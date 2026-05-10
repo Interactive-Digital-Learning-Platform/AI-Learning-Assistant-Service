@@ -1,6 +1,13 @@
-def main():
-    print("Hello from ai-learning-assistant-service!")
+from fastapi import FastAPI
+
+app = FastAPI()
 
 
-if __name__ == "__main__":
-    main()
+@app.get("/")
+async def root():
+    return {"status": "ok"}
+
+
+@app.get("/health")
+async def getHealth():
+    return {"message": "Learning Assistant Service is active..."}
