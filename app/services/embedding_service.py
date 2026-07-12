@@ -1,29 +1,41 @@
-from app.core.config import EMBEDDING_MODEL, EMBEDDING_DEVICE, MAX_TOKENS
-from sentence_transformers import SentenceTransformer
-from typing import List
 import logging
+from typing import List
+
+from sentence_transformers import SentenceTransformer
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class EmbeddingGenerator:
-
     def __init__(
         self,
-        model_name: str = EMBEDDING_MODEL,
-        device: str = EMBEDDING_DEVICE,
-        batch_size: int = 32,
+        model_name: str = settings.EMBEDDING_MODEL,
+        device: str = settings.EMBEDDING_DEVICE,
+        batch_size: int = settings.MAX_INPUTS_PER_BATCH,
     ):
         self.model_name = model_name
         self.batch_size = batch_size
         self.device = device
 
         logger.info(f"Loading embedding model '{model_name}' on {device}...")
+
         self.model = SentenceTransformer(model_name, device=device)
+
+        actual_dim = self.embedding_dimension()
+
+        if actual_dim != settings.EMBEDDING_DIM:
+            raise ValueError(
+                f"Model '{model_name}' outputs {actual_dim}-dim vectors "
+                f"but EMBEDDING_DIM={settings.EMBEDDING_DIM} in config. "
+                f"Query vectors won't match indexed vectors."
+            )
+
         logger.info(f"Embedding model ready — dim={self.embedding_dimension()}")
 
     def embed_single(self, text: str) -> List[float]:
-        prefixed = f"Represent this sentence for searching relevant passages: {text}"
+        prefixed = f"search_query: {text}"
         prefixed = self._truncate(prefixed, label="query")
 
         embedding = self.model.encode(
@@ -34,12 +46,20 @@ class EmbeddingGenerator:
         return embedding.tolist()
 
     def embedding_dimension(self) -> int:
-        return self.model.get_embedding_dimension()
+        dim = self.model.get_embedding_dimension()
+
+        if dim is None:
+            dim = len(self.model.encode("probe", convert_to_numpy=True))
+
+        return dim
 
     def _truncate(self, text: str, label: str = "text") -> str:
         estimated = int(len(text.split()) * 1.3)
-        if estimated > MAX_TOKENS:
-            max_words = int(MAX_TOKENS / 1.3)
+
+        if estimated > settings.MAX_TOKENS:
+            max_words = int(settings.MAX_TOKENS / 1.3)
             text = " ".join(text.split()[:max_words])
+
             logger.warning(f"{label} truncated to {max_words} words")
+
         return text

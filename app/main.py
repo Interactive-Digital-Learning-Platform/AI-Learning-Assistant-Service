@@ -1,25 +1,26 @@
-import os
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
+# import os
+# os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-import redis.asyncio as aioredis
 from app.services.embedding_service import EmbeddingGenerator
-from app.core.config import REDIS_URL
+from app.services.session_service import SessionService
+from app.services.retrieval_service import RetrievalService
+from app.services.chat_service import ChatService
 from app.routes.chat_routes import router as chat_router
+from app.core.redis import redis_instance
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    embedder = EmbeddingGenerator()
-    app.state.embedder = embedder
-
-    r = aioredis.from_url(REDIS_URL)
-    await r.ping()
-    await r.aclose()
+    app.state.embedder = EmbeddingGenerator()
+    app.state.session_service = SessionService()
+    app.state.retrieval_service = RetrievalService(embedder=app.state.embedder)
+    app.state.chat_service = ChatService()
+    redis_instance.ping()
 
     yield
+    await redis_instance.aclose()
 
 
 app = FastAPI(lifespan=lifespan)
