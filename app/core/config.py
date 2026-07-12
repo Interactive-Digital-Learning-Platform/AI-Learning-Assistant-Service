@@ -1,30 +1,40 @@
-from dotenv import load_dotenv
-import os
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import SecretStr
 
-load_dotenv()
+class Settings(BaseSettings):
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
 
-DB_URL = os.getenv("DB_URL")
-PORT = int(os.getenv("PORT"))
+    DB_URL: str
+    PORT: int = 8005
+
+    EMBEDDING_MODEL: str = "nomic-ai/nomic-embed-text-v1.5"
+    EMBEDDING_DEVICE: str = "cpu"
+    MAX_TOKENS: int = 8192
+    EMBEDDING_DIM: int = 768
+
+    QDRANT_URL: str
+    QDRANT_COLLECTION: str = "pdf_knowledge_base"
+
+    TOP_K_CHUNKS: int = 5
+    SCORE_THRESHOLD: float = 0.6
+    MAX_HISTORY_MESSAGES: int = 10
+    
+    GROQ_API_KEY: SecretStr
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
+    TEMPERATURE: float = 0.5
+
+    REDIS_URL: str
+    HISTORY_TTL: int = 3600
+
+    KEY_PREFIX: str
+    MAX_INPUTS_PER_BATCH: int = 32
+
+    MAX_CONTEXT_CHARS: int = 12000
 
 
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
-EMBEDDING_DEVICE= os.getenv("EMBEDDING_DEVICE")
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", 512))
-QDRANT_URL = os.getenv("QDRANT_URL")
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION")
-
-
-TOP_K_CHUNKS = int(os.getenv("TOP_K_CHUNKS"))
-SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD"))
-MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES"))
-
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL")
-TEMPERATURE = float(os.getenv("TEMPERATURE"))
-
-
-REDIS_URL = os.getenv("REDIS_URL")
-HISTORY_TTL = int(os.getenv("HISTORY_TTL"))
-
-KEY_PREFIX = os.getenv("KEY_PREFIX")
+settings = Settings()

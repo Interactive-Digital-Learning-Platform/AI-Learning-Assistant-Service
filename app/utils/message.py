@@ -1,20 +1,24 @@
-from app.models.message_model import Message, MessageRole
-from app.schemas.message import MessageResponse, SourceCitation
-from app.schemas.conversation import ChatRequest
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.services.session_service import SessionService
-from app.services.chat_service import ChatService
-from app.services.retrieval_service import RetrievalService
-from datetime import datetime, timezone
+import asyncio
 import json
 import logging
-import asyncio
+import time
+from datetime import datetime, timezone
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.models.message_model import Message, MessageRole
+from app.schemas.conversation import ChatRequest
+from app.schemas.message import MessageResponse, SourceCitation
+from app.services.chat_service import ChatService
+from app.services.retrieval_service import RetrievalService
+from app.services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
 
 
 def message_to_response(msg: Message) -> MessageResponse:
-    meta = msg.metadata or {}
+    meta = msg.message_metadata or {}
     sources = [
         SourceCitation(
             filename=s.get("filename", ""),
@@ -24,7 +28,7 @@ def message_to_response(msg: Message) -> MessageResponse:
         for s in meta.get("sources", [])
     ]
     return MessageResponse(
-        message_id=msg.id,
+        id=msg.id,
         conversation_id=msg.conversation_id,
         role=msg.role,
         content=msg.content,
@@ -33,15 +37,21 @@ def message_to_response(msg: Message) -> MessageResponse:
     )
 
 
-async def sse_generator(conv, request: ChatRequest, session: AsyncSession, embedder):
-    
+async def sse_generator(
+    conv,
+    request: ChatRequest,
+    session: AsyncSession,
+    session_service: SessionService,
+    retrieval_service: RetrievalService,
+    chat_service: ChatService,
+):
+
     full_response = ""
     assistant_msg = None
-    session_service = SessionService()
     conversation_id = str(conv.id)
+    _committed = False
 
     try:
-
         user_message = Message(
             conversation_id=conv.id,
             role=MessageRole.USER,
@@ -51,12 +61,9 @@ async def sse_generator(conv, request: ChatRequest, session: AsyncSession, embed
         session.add(user_message)
         await session.flush()
 
-        await session_service.append_message(conversation_id, "user", request.message)
-
-        retrieval = RetrievalService(embedder=embedder)
         try:
             chunks = await asyncio.wait_for(
-                retrieval.search(query=request.message),
+                retrieval_service.search(query=request.message),
                 timeout=10,
             )
         except asyncio.TimeoutError:
@@ -73,13 +80,18 @@ async def sse_generator(conv, request: ChatRequest, session: AsyncSession, embed
 
         history = await session_service.get_langchain_history(conversation_id)
 
-        chat_service = ChatService()
+        deadline = time.monotonic() + 60.0
+        
         try:
             async for token in chat_service.stream_response(
                 message=request.message,
                 history=history,
                 context=chunks,
             ):
+                if time.monotonic() > deadline:
+                    logger.error(f"LLM stream timeout — conversation={conversation_id}")
+                    raise asyncio.TimeoutError("LLM response exceeded time limit")
+                    
                 full_response += token
                 yield {
                     "data": json.dumps(
@@ -95,6 +107,7 @@ async def sse_generator(conv, request: ChatRequest, session: AsyncSession, embed
                 exc_info=True,
             )
             await session.rollback()
+            _committed = True
             yield {
                 "data": json.dumps(
                     {
@@ -114,6 +127,13 @@ async def sse_generator(conv, request: ChatRequest, session: AsyncSession, embed
             for c in chunks
         ]
 
+        if not conv.title:
+            conv.title = (
+                request.message[:97] + "..."
+                if len(request.message) > 100
+                else request.message
+            )
+
         assistant_msg = Message(
             conversation_id=conv.id,
             role=MessageRole.ASSISTANT,
@@ -121,29 +141,23 @@ async def sse_generator(conv, request: ChatRequest, session: AsyncSession, embed
             token_count=int(len(full_response.split()) * 1.3),
             metadata={
                 "sources": sources,
-                "model": request.__class__.__name__,
+                "model": settings.GROQ_MODEL,
                 "rag_used": len(chunks) > 0,
                 "chunks_used": len(chunks),
             },
         )
-        session.add(assistant_msg)
 
+        session.add(assistant_msg)
         conv.updated_at = datetime.now(timezone.utc)
 
         await session.commit()
+        _committed = True
         await session.refresh(assistant_msg)
 
+        await session_service.append_message(conversation_id, "user", request.message)
         await session_service.append_message(
             conversation_id, "assistant", full_response
         )
-
-        if not conv.title:
-            conv.title = (
-                request.message[:97] + "..."
-                if len(request.message) > 100
-                else request.message
-            )
-            await session.commit()
 
         yield {
             "data": json.dumps(
@@ -166,7 +180,10 @@ async def sse_generator(conv, request: ChatRequest, session: AsyncSession, embed
             f"Stream error — conversation={conversation_id}: {exc}",
             exc_info=True,
         )
-        await session.rollback()
+
+        if not _committed:
+            await session.rollback()
+            
         yield {
             "data": json.dumps(
                 {
