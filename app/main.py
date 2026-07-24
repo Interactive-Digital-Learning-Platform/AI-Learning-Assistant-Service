@@ -9,6 +9,7 @@ from app.services.retrieval_service import RetrievalService
 from app.services.chat_service import ChatService
 from app.routes.chat_routes import router as chat_router
 from app.core.redis import redis_instance
+from app.core.groq import llm
 
 
 @asynccontextmanager
@@ -16,7 +17,7 @@ async def lifespan(app: FastAPI):
     app.state.embedder = EmbeddingGenerator()
     app.state.session_service = SessionService()
     app.state.retrieval_service = RetrievalService(embedder=app.state.embedder)
-    app.state.chat_service = ChatService()
+    app.state.chat_service = ChatService(llm)
     redis_instance.ping()
 
     yield

@@ -61,24 +61,7 @@ async def sse_generator(
         session.add(user_message)
         await session.flush()
 
-        try:
-            chunks = await asyncio.wait_for(
-                retrieval_service.search(query=request.message),
-                timeout=10,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Retrieval timed out — conversation={conversation_id}",
-            )
-            chunks = []
-        except Exception as exc:
-            logger.warning(
-                f"Retrieval failed — conversation={conversation_id}: {exc}",
-                exc_info=True,
-            )
-            chunks = []
-
-        history = await session_service.get_langchain_history(conversation_id)
+    
 
         deadline = time.monotonic() + 60.0
         
