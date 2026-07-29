@@ -2,16 +2,16 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
+from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
+from app.models.conversation_model import Conversation
 from app.models.message_model import Message, MessageRole
+from app.schemas.agent_state import AgentState
 from app.schemas.conversation import ChatRequest
 from app.schemas.message import MessageResponse, SourceCitation
-from app.services.chat_service import ChatService
-from app.services.retrieval_service import RetrievalService
 from app.services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
@@ -37,19 +37,18 @@ def message_to_response(msg: Message) -> MessageResponse:
     )
 
 
-async def sse_generator(
-    conv,
+async def chat_stream_handler(
+    conv: Conversation,
     request: ChatRequest,
     session: AsyncSession,
-    session_service: SessionService,
-    retrieval_service: RetrievalService,
-    chat_service: ChatService,
+    assistant_graph: CompiledStateGraph,
+    session_service: SessionService
 ):
 
     full_response = ""
-    assistant_msg = None
+    final_state = None
     conversation_id = str(conv.id)
-    _committed = False
+    committed = False
 
     try:
         user_message = Message(
@@ -61,54 +60,53 @@ async def sse_generator(
         session.add(user_message)
         await session.flush()
 
-    
+        initial_state: AgentState = {
+            "conversation_id": conversation_id,
+            "user_id": str(conv.user_id),
+            "user_message": request.message,
+            "history": [],
+            "intent": "general",
+            "retrieved_chunks": [],
+            "sources": [],
+            "rewritten_query": "",
+            "context": [],
+            "response": "",
+            "rag_used": False,
+            "error": ""
+        }
 
         deadline = time.monotonic() + 60.0
-        
-        try:
-            async for token in chat_service.stream_response(
-                message=request.message,
-                history=history,
-                context=chunks,
-            ):
-                if time.monotonic() > deadline:
-                    logger.error(f"LLM stream timeout — conversation={conversation_id}")
-                    raise asyncio.TimeoutError("LLM response exceeded time limit")
-                    
-                full_response += token
-                yield {
-                    "data": json.dumps(
-                        {
+
+        stream = await assistant_graph.astream_events(
+            initial_state,
+            version="v3"
+        )
+
+
+        async for message in stream.messages:
+            if time.monotonic() > deadline:
+                raise asyncio.TimeoutError("Graph Execution timeout!")
+
+            if message.node != "generate_response":
+                continue
+
+            async for token in message.text:
+                if token:
+                    full_response += token
+                    yield {
+                        "data": json.dumps({
                             "type": "token",
                             "token": token,
-                        }
-                    )
-                }
-        except Exception as exc:
-            logger.error(
-                f"LLM stream failed — conversation={conversation_id}: {exc}",
-                exc_info=True,
-            )
-            await session.rollback()
-            _committed = True
-            yield {
-                "data": json.dumps(
-                    {
-                        "type": "error",
-                        "error": "AI response timed out. Please try again.",
+                        })
                     }
-                )
-            }
-            return
 
-        sources = [
-            {
-                "filename": c.metadata.get("filename", ""),
-                "page": c.metadata.get("page_start", 0),
-                "score": c.score,
-            }
-            for c in chunks
-        ]
+        final_state = await stream.output()
+
+        if final_state is None:
+            raise RuntimeError("Graph finished without producing a final state")
+
+
+        sources = final_state.get("sources", [])
 
         if not conv.title:
             conv.title = (
@@ -117,31 +115,46 @@ async def sse_generator(
                 else request.message
             )
 
+        
         assistant_msg = Message(
             conversation_id=conv.id,
             role=MessageRole.ASSISTANT,
-            content=full_response,
+            content=final_state.get("response", full_response),
             token_count=int(len(full_response.split()) * 1.3),
             metadata={
                 "sources": sources,
-                "model": settings.GROQ_MODEL,
-                "rag_used": len(chunks) > 0,
-                "chunks_used": len(chunks),
+                "intent": final_state.get("intent"),
+                "rag_used": final_state.get("rag_used", False),
+                "rewritten_query": final_state.get("rewritten_query", ""),
             },
         )
 
         session.add(assistant_msg)
-        conv.updated_at = datetime.now(timezone.utc)
+        conv.updated_at = datetime.now(UTC)
 
         await session.commit()
-        _committed = True
+        committed = True
         await session.refresh(assistant_msg)
 
-        await session_service.append_message(conversation_id, "user", request.message)
-        await session_service.append_message(
-            conversation_id, "assistant", full_response
-        )
+        try:
+            await session_service.append_message(
+                conversation_id,
+                MessageRole.USER,
+                request.message
+            )
 
+            await session_service.append_message(
+                conversation_id,
+                MessageRole.ASSISTANT,
+                full_response
+            )
+
+        except Exception as e:
+            logger.exception(
+                "Redis append failed — conversation=%s",
+                conversation_id,
+            )
+            
         yield {
             "data": json.dumps(
                 {
@@ -154,17 +167,37 @@ async def sse_generator(
 
         logger.info(
             f"Message complete — conversation={conversation_id} "
-            f"rag={'yes' if chunks else 'no'} "
-            f"chunks={len(chunks)} tokens≈{len(full_response.split())}"
+            f"rag={final_state.get("rag_used", False)} "
+            f"intent={final_state.get("intent")}"
+            f"chunks={len(final_state.get("retrieved_chunks", []))}"
         )
 
-    except Exception as exc:
+    except asyncio.TimeoutError:
         logger.error(
-            f"Stream error — conversation={conversation_id}: {exc}",
+            "Graph timeout — conversation=%s",
+            conversation_id,
+        )
+
+        if not committed:
+            await session.rollback()
+
+
+        yield {
+            "data": json.dumps({
+                "type": "error",
+                "error": "Request timed out. Please try again."
+            })
+        }
+
+    except Exception as e:
+        logger.error(
+            "Chat stream failed — conversation=%s error=%s",
+            conversation_id,
+            e,
             exc_info=True,
         )
 
-        if not _committed:
+        if not committed:
             await session.rollback()
             
         yield {

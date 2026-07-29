@@ -1,23 +1,48 @@
 # import os
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-from app.services.embedding_service import EmbeddingGenerator
-from app.services.session_service import SessionService
-from app.services.retrieval_service import RetrievalService
-from app.services.chat_service import ChatService
-from app.routes.chat_routes import router as chat_router
-from app.core.redis import redis_instance
+
 from app.core.groq import llm
+from app.core.redis import redis_instance
+from app.graph.nodes import GraphNodes
+from app.graph.workflow import create_assistant_graph
+from app.routes.chat_routes import router as chat_router
+from app.services.chat_service import ChatService
+from app.services.embedding_service import EmbeddingGenerator
+from app.services.intent_service import IntentService
+from app.services.retrieval_service import RetrievalService
+from app.services.session_service import SessionService
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.embedder = EmbeddingGenerator()
-    app.state.session_service = SessionService()
-    app.state.retrieval_service = RetrievalService(embedder=app.state.embedder)
-    app.state.chat_service = ChatService(llm)
+    embedder = EmbeddingGenerator()
+    session_service = SessionService()
+    retrieval_service = RetrievalService(embedder=embedder)
+    chat_service = ChatService(llm)
+    intent_service = IntentService(llm)
+
+    nodes = GraphNodes(
+        chat_service=chat_service,
+        session_service=session_service,
+        retrieval_service=retrieval_service
+    )
+
+    assistant_graph = create_assistant_graph(
+        nodes,
+        intent_service
+    )
+
+    app.state.embedder = embedder
+    app.state.session_service = session_service
+    app.state.retrieval_service = retrieval_service
+    app.state.chat_service = chat_service
+    app.state.intent_service = intent_service
+    app.state.assistant_graph = assistant_graph
+    
     redis_instance.ping()
 
     yield
