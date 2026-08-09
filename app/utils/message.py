@@ -75,30 +75,27 @@ async def chat_stream_handler(
             "error": ""
         }
 
-        deadline = time.monotonic() + 60.0
-
         stream = await assistant_graph.astream_events(
             initial_state,
             version="v3"
         )
 
-
-        async for message in stream.messages:
-            if time.monotonic() > deadline:
-                raise asyncio.TimeoutError("Graph Execution timeout!")
-
-            if message.node != "generate_response":
-                continue
-
-            async for token in message.text:
-                if token:
-                    full_response += token
-                    yield {
-                        "data": json.dumps({
-                            "type": "token",
-                            "token": token,
-                        })
-                    }
+        async with asyncio.timeout(90.0):
+            async for message in stream.messages:
+                logger.info(f"Message object: {message}")
+    
+                if message.node != "generate_response":
+                    continue
+    
+                async for token in message.text:
+                    if token:
+                        full_response += token
+                        yield {
+                            "data": json.dumps({
+                                "type": "token",
+                                "token": token,
+                            })
+                        }
 
         final_state = await stream.output()
 
@@ -167,9 +164,9 @@ async def chat_stream_handler(
 
         logger.info(
             f"Message complete — conversation={conversation_id} "
-            f"rag={final_state.get("rag_used", False)} "
-            f"intent={final_state.get("intent")}"
-            f"chunks={len(final_state.get("retrieved_chunks", []))}"
+            f"rag={final_state.get('rag_used', False)} "
+            f"intent={final_state.get('intent')}"
+            f"chunks={len(final_state.get('retrieved_chunks', []))}"
         )
 
     except asyncio.TimeoutError:

@@ -171,6 +171,11 @@ async def stream_message(
                 api_request.app.state.session_service,
             ),
             media_type="text/event-stream",
+            ping=10,
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            }
         )
 
     except Exception as e:

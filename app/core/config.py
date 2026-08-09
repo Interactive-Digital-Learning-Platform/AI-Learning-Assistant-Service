@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     MAX_HISTORY_MESSAGES: int = 10
     
     GROQ_API_KEY: SecretStr
-    GROQ_MODEL: str = "llama-3.1-8b-instant"
-    TEMPERATURE: float = 0.5
+    GROQ_MODEL: str
+    TEMPERATURE: float = 0.3
 
     REDIS_URL: str
     HISTORY_TTL: int = 3600

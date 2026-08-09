@@ -1,4 +1,4 @@
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 classification_prompt = ChatPromptTemplate(
     [
@@ -11,7 +11,13 @@ classification_prompt = ChatPromptTemplate(
 
             - rag: For questions that require retrieving information from the knowledge base, documents, textbooks, or subject materials.
 
-            Return only the classified intent.""",
+            Classify the query as either "general" or "rag".
+            
+            Return exactly one JSON object with a required "intent" field.
+            The intent value must be either "general" or "rag".
+            Do not return a bare string, Markdown, or additional text.
+
+            """,
         ),
         (
             "human",
@@ -26,17 +32,19 @@ classification_prompt = ChatPromptTemplate(
     ]
 )
 
-
 query_rewrite_prompt = ChatPromptTemplate(
     [
         (
             "system",
-            """You are a query rewriter. Given a conversation history and a user question,
-            rewrite the question to be a clear standalone search query.
-            Return ONLY the rewritten query, nothing else.
-            """,
+            """
+            Rewrite the latest question as a standalone search query.
+            Use history only to resolve missing context.
+            Preserve meaning and important details.
+            Do not answer or add information.
+            If already standalone, return it unchanged.
+            """.strip(),
         ),
-        ("placeholder", "{history}"),
+        MessagesPlaceholder(variable_name="history"),
         ("human", "Question: {user_query}"),
     ]
 )

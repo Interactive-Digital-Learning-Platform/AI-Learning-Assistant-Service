@@ -14,7 +14,7 @@ class IntentService:
         self, state: AgentState
     ) -> Command[Literal["generate_response", "rewrite_query"]]:
 
-        structured_llm = self.llm.with_structured_output(QueryClassification)
+        structured_llm = self.llm.with_structured_output(QueryClassification, method="json_mode")
 
         chain = classification_prompt | structured_llm
 
@@ -22,13 +22,13 @@ class IntentService:
             {"user_message": state["user_message"], "history": state["history"]}
         )
 
-        if classification["intent"] == "general":
+        if classification.intent == "general":
             goto = "generate_response"
 
-        elif classification["intent"] == "rag":
+        elif classification.intent == "rag":
             goto = "rewrite_query"
 
         else:
-            raise ValueError(f"Unknown intent: {classification['intent']}")
+            raise ValueError(f"Unknown intent: {classification.intent}")
 
-        return Command(update={"intent": classification["intent"]}, goto=goto)
+        return Command(update={"intent": classification.intent}, goto=goto)

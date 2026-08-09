@@ -1,7 +1,8 @@
-from typing import Literal, Optional, TypedDict
+from typing import Literal
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
+from typing_extensions import NotRequired, TypedDict
 
 from app.services.retrieval_service import SearchResult
 
@@ -11,7 +12,8 @@ class QueryClassification(BaseModel):
 
 
 class RewrittenQuery(BaseModel):
-    rewritten_query: str = Field(description="Rewritten query for the user query")
+    rewritten_query: str = Field(description="A standalone search query preserving the meaning and important "
+                "details of the user's latest question")
 
 
 class AgentState(TypedDict):
@@ -31,4 +33,4 @@ class AgentState(TypedDict):
     sources: list
     rag_used: bool
 
-    error: Optional[str]
+    error: NotRequired[str]

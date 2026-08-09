@@ -1,4 +1,5 @@
 import logging
+from asyncio import wait_for
 from typing import Any, Literal
 
 from langgraph.types import Command
@@ -25,6 +26,7 @@ class GraphNodes:
     async def load_memory_node(
         self, state: AgentState
     ) -> Command[Literal["classify_intent"]]:
+        logger.info("Load memory node is reached")
         history = await self.session_service.get_langchain_history(
             state["conversation_id"]
         )
@@ -32,20 +34,31 @@ class GraphNodes:
         return Command(update={"history": history}, goto="classify_intent")
 
     async def rewrite_query_node(self, state: AgentState) -> dict[str, Any]:
-        rewritten_query = await self.chat_service.rewrite_query(
+        response = await self.chat_service.rewrite_query(
             user_query=state["user_message"], history=state["history"]
         )
 
         logger.info(
-            f"Query rewritten: '{state['user_message']}' -> '{rewritten_query}'"
+            f"Query rewritten: '{state['user_message']}' -> '{response.rewritten_query}'"
         )
 
-        return {"rewritten_query": rewritten_query}
+        return {"rewritten_query": response.rewritten_query}
 
     async def retrieve_docs_node(self, state: AgentState) -> dict[str, Any]:
         query = state["rewritten_query"] or state["user_message"]
-        chunks = await self.retrieval_service.search(query=query)
-        context = self.chat_service.format_context(chunks=chunks)
+
+        try:
+            chunks = await wait_for(
+                self.retrieval_service.search(query=query),
+                timeout=15.0
+            )
+
+        except Exception:
+            logger.exception(
+                "Document retrieval failed; continuing without context"
+            )
+            chunks = []
+            
         sources = [
             {
                 "filename": c.metadata.get("filename", ""),
@@ -57,16 +70,18 @@ class GraphNodes:
 
         return {
             "sources": sources,
-            "context": context,
-            "chunks_retrieved": chunks,
-            "rag_used": len(chunks) > 0,
+            "context": chunks,
+            "retrieved_chunks": chunks,
+            "rag_used": True if state["intent"] == "rag" else False,
         }
 
     async def generate_response_node(self, state: AgentState) -> dict[str, Any]:
+        logger.info("Response node is reached")
         response = await self.chat_service.get_response(
             message=state["rewritten_query"] or state["user_message"],
             history=state["history"],
             context=state["context"],
+            mode=state["intent"]
         )
 
         return {"response": response}

@@ -18,7 +18,7 @@ def create_assistant_graph(
     workflow.add_node(
         "retrieve_docs",
         nodes.retrieve_docs_node,
-        retry_policy=RetryPolicy(max_attempts=3),
+        retry_policy=RetryPolicy(max_attempts=2),
     )
     workflow.add_node("generate_response", nodes.generate_response_node)
 
