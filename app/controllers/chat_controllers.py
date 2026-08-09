@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Optional
 
 from fastapi import HTTPException, Request
@@ -16,7 +16,7 @@ from app.schemas.conversation import (
 )
 from app.schemas.message import MessageHistoryResponse
 from app.utils.conversation import conversation_to_response, get_conversation_or_404
-from app.utils.message import message_to_response, sse_generator
+from app.utils.message import chat_stream_handler, message_to_response
 
 logger = logging.getLogger(__name__)
 
@@ -163,15 +163,19 @@ async def stream_message(
             raise HTTPException(status_code=403, detail="Access denied")
 
         return EventSourceResponse(
-            sse_generator(
+            chat_stream_handler(
                 conv,
                 request,
                 session,
-                session_service=api_request.app.state.session_service,
-                retrieval_service=api_request.app.state.retrieval_service,
-                chat_service=api_request.app.state.chat_service,
+                api_request.app.state.assistant_graph,
+                api_request.app.state.session_service,
             ),
             media_type="text/event-stream",
+            ping=10,
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            }
         )
 
     except Exception as e:
@@ -234,7 +238,7 @@ async def send_message(
             metadata={"sources": sources, "rag_used": len(chunks) > 0},
         )
         session.add(assistant_msg)
-        conv.updated_at = datetime.now(timezone.utc)
+        conv.updated_at = datetime.now(UTC)
         await session.commit()
         await session.refresh(assistant_msg)
 

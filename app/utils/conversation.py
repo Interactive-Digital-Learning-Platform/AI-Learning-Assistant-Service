@@ -1,8 +1,11 @@
+import uuid
+
+from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.models.conversation_model import Conversation
 from app.schemas.conversation import ConversationResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import HTTPException
-import uuid
+
 
 def conversation_to_response(
     conv: Conversation,

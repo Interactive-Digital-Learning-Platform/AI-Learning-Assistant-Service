@@ -1,12 +1,12 @@
-from app.core.database import Base
-from sqlalchemy import DateTime, ForeignKey, Enum, Text, Integer
-from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.orm import relationship
-from datetime import datetime, timezone
-from app.schemas.message import MessageRole
 import uuid
+from datetime import datetime, timezone
 
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Text
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+from app.schemas.message import MessageRole
 
 
 class Message(Base):

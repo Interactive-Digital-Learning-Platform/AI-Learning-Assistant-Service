@@ -1,9 +1,11 @@
 import logging
+from asyncio import to_thread
 from dataclasses import dataclass
 from typing import Optional
-from asyncio import to_thread
+
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import FieldCondition, MatchValue, Filter
+from qdrant_client.models import FieldCondition, Filter, MatchValue
+
 from app.core.config import settings
 from app.services.embedding_service import EmbeddingGenerator
 

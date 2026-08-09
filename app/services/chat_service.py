@@ -1,19 +1,23 @@
 import logging
 from asyncio import wait_for
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage
 from langchain_core.output_parsers import StrOutputParser
 
-from app.core.groq import llm
-from app.prompts.chat_prompts import general_system_prompt, rag_system_prompt
-from app.services.retrieval_service import SearchResult
 from app.core.config import settings
+from app.prompts.chat_prompts import general_system_prompt, rag_system_prompt
+from app.prompts.graph_prompts import query_rewrite_prompt
+from app.schemas.agent_state import RewrittenQuery
+from app.services.retrieval_service import SearchResult
 
 logger = logging.getLogger(__name__)
 
 
 class ChatService:
-    def __init__(self):
+    def __init__(self, llm: BaseChatModel):
         self.llm = llm
         self.parser = StrOutputParser()
 
@@ -22,21 +26,21 @@ class ChatService:
         message: str,
         history: list,
         context: list[SearchResult],
+        mode: str
     ) -> AsyncGenerator[str, None]:
 
-        rag_mode = len(context) > 0
-        prompt = rag_system_prompt if rag_mode else general_system_prompt
+        prompt = rag_system_prompt if mode == "rag" else general_system_prompt
 
         chain = prompt | self.llm | self.parser
 
         input_vars: dict[str, Any] = {"history": history, "question": message}
 
-        if rag_mode:
-            input_vars["context"] = self._format_context(context)
+        if mode == "rag":
+            input_vars["context"] = self.format_context(context)
 
         logger.info(
             f"Generating response — "
-            f"mode={'RAG' if rag_mode else 'general'} "
+            f"mode={mode} "
             f"chunks={len(context)} "
             f"history_msgs={len(history)}"
         )
@@ -44,29 +48,51 @@ class ChatService:
         try:
             async for token in chain.astream(input_vars):
                 yield token
-        except Exception as e:
-            logger.error(f"LLM stream error: {e}", exc_info=True)
+        except Exception:
+            logger.exception("LLM stream error")
             raise
 
     async def get_response(
-        self, message: str, history: list, context: list[SearchResult]
-    ) -> str:
-        async def _collect() -> str:
-            result = ""
-            async for token in self.stream_response(message, history, context):
-                result += token
-            return result
+        self, message: str, history: list, context: list[SearchResult], mode: str
+    ):
 
-        return await wait_for(_collect(), timeout=60.0)
+        prompt = rag_system_prompt if mode == "rag" else general_system_prompt
+
+        chain = prompt | self.llm | self.parser
+
+        input_vars: dict[str, Any] = {"history": history, "question": message}
+
+        if mode == "rag":
+            input_vars["context"] = self.format_context(context)
+
+        logger.info(
+            f"Generating response — "
+            f"mode={mode} "
+            f"chunks={len(context)} "
+            f"history_msgs={len(history)}"
+        )
+
+        try:
+            response = await wait_for(
+                chain.ainvoke(input_vars),
+                timeout=60.0
+            )
+
+            return response
+
+        except Exception as e:
+            logger.exception(f"LLM response generation error: {e}")
+            raise
+            
 
     @staticmethod
-    def _format_context(chunks: list[SearchResult]) -> str:
+    def format_context(chunks: list[SearchResult]) -> str:
         if not chunks:
             return ""
 
         parts = []
         total_chars = 0
-        
+
         for i, chunk in enumerate(chunks, 1):
             filename = chunk.metadata.get("filename", "unknown")
             page = chunk.metadata.get("page_start", "?")
@@ -76,8 +102,39 @@ class ChatService:
             total_chars += len(part)
 
             if total_chars > settings.MAX_CONTEXT_CHARS:
-                logger.warning(f"Context truncated at chunk {i} — exceeded {settings.MAX_CONTEXT_CHARS} chars")
+                logger.warning(
+                    f"Context truncated at chunk {i} — exceeded {settings.MAX_CONTEXT_CHARS} chars"
+                )
                 break
-                
-            parts.append(part)
+
         return "\n\n---\n\n".join(parts)
+
+    async def rewrite_query(self, user_query: str, history: list[BaseMessage]):
+        if not history:
+            return RewrittenQuery(rewritten_query=user_query)
+
+        structured_llm = self.llm.with_structured_output(RewrittenQuery)
+
+        chain = query_rewrite_prompt | structured_llm
+
+        try:
+            result = await wait_for(
+                chain.ainvoke(
+                    {"history": history, "user_query": user_query}
+                ),
+                timeout=15.0
+            )
+
+            return result
+
+        except TimeoutError:
+            logger.warning(
+                "Query rewriting timed out; using original user query"
+            )
+
+        except Exception:
+            logger.exception(
+                "Query rewriting failed; using original user query"
+            )
+            
+            return RewrittenQuery(rewritten_query=user_query)
