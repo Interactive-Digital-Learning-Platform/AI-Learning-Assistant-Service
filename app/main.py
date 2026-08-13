@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from redis.exceptions import RedisError
 
 from app.core.groq import llm
 from app.core.redis import redis_instance
@@ -13,6 +14,7 @@ from app.routes.chat_routes import router as chat_router
 from app.services.chat_service import ChatService
 from app.services.embedding_service import EmbeddingGenerator
 from app.services.intent_service import IntentService
+from app.services.rerank_service import RerankService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_service import SessionService
 
@@ -21,7 +23,8 @@ from app.services.session_service import SessionService
 async def lifespan(app: FastAPI):
     embedder = EmbeddingGenerator()
     session_service = SessionService()
-    retrieval_service = RetrievalService(embedder=embedder)
+    rerank_service = RerankService()
+    retrieval_service = RetrievalService(embedder=embedder, reranker=rerank_service)
     chat_service = ChatService(llm)
     intent_service = IntentService(llm)
 
@@ -43,7 +46,10 @@ async def lifespan(app: FastAPI):
     app.state.intent_service = intent_service
     app.state.assistant_graph = assistant_graph
     
-    redis_instance.ping()
+    try:
+        await redis_instance.ping()
+    except RedisError as e:
+        raise RuntimeError("Failed to connect to Redis") from e
 
     yield
     await redis_instance.aclose()

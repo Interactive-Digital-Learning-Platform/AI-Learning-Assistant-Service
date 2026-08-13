@@ -37,5 +37,8 @@ class Settings(BaseSettings):
 
     MAX_CONTEXT_CHARS: int = 12000
 
+    RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    RERANK_OVERFETCH: int = 4
+
 
 settings = Settings()
