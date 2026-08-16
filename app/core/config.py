@@ -40,5 +40,10 @@ class Settings(BaseSettings):
     RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     RERANK_OVERFETCH: int = 4
 
+    LANGSMITH_TRACING: bool = True
+    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+    LANGSMITH_API_KEY: str
+    LANGSMITH_PROJECT: str
+
 
 settings = Settings()

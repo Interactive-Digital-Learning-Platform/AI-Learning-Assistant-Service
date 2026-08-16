@@ -66,16 +66,15 @@ async def get_messages(
     )
 
 
-@router.post("/{conversation_id}/messages/stream")
+@router.post("/messages/stream")
 async def stream_message(
-    conversation_id: str,
     api_request: Request,
     request: ChatRequest,
     session: Annotated[AsyncSession, Depends(get_async_session)],
 ):
 
     return await chat_controllers.stream_message(
-        session, conversation_id, api_request, request
+        session, api_request, request
     )
 
 
