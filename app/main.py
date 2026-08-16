@@ -1,5 +1,8 @@
 # import os
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
+from dotenv import load_dotenv
+load_dotenv()
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI

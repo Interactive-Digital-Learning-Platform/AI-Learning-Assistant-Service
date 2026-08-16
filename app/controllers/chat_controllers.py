@@ -153,22 +153,32 @@ async def get_messages(
 
 async def stream_message(
     session: AsyncSession,
-    conversation_id: str,
     api_request: Request,
     request: ChatRequest,
 ):
     try:
-        conv = await get_conversation_or_404(conversation_id, session)
-        if conv.user_id != request.user_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+        is_new_conversation = request.conversation_id is None
+
+        if request.conversation_id is None:
+            conversation = Conversation(
+                user_id=request.user_id,
+            )
+            session.add(conversation)
+            await session.commit()
+            await session.refresh(conversation)
+        else:
+            conversation = await get_conversation_or_404(request.conversation_id, session)
+            if conversation.user_id != request.user_id:
+                raise HTTPException(status_code=403, detail="Access denied")
 
         return EventSourceResponse(
             chat_stream_handler(
-                conv,
+                conversation,
                 request,
                 session,
                 api_request.app.state.assistant_graph,
                 api_request.app.state.session_service,
+                is_new_conversation
             ),
             media_type="text/event-stream",
             ping=10,
@@ -177,7 +187,8 @@ async def stream_message(
                 "X-Accel-Buffering": "no",
             }
         )
-
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

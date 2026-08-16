@@ -41,7 +41,8 @@ async def chat_stream_handler(
     request: ChatRequest,
     session: AsyncSession,
     assistant_graph: CompiledStateGraph,
-    session_service: SessionService
+    session_service: SessionService,
+    is_new_conversation: bool = False
 ):
 
     full_response = ""
@@ -50,6 +51,14 @@ async def chat_stream_handler(
     committed = False
 
     try:
+        if is_new_conversation:
+            yield {
+                "data": json.dumps({
+                    "type": "conversation_created",
+                    "conversation_id": conversation_id
+                })
+            }
+            
         user_message = Message(
             conversation_id=conv.id,
             role=MessageRole.USER,

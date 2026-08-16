@@ -11,6 +11,7 @@ dependencies = [
     "langchain>=1.2.18",
     "langchain-groq>=1.1.2",
     "langgraph>=1.2.10",
+    "langsmith>=0.8.3",
     "pydantic-settings>=2.14.2",
     "python-dotenv>=1.2.2",
     "qdrant-client[fastembed]>=1.17.1",
