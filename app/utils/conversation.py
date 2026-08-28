@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import HTTPException
@@ -6,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.conversation_model import Conversation
 from app.schemas.conversation import ConversationResponse
 
+logger = logging.getLogger(__name__)
 
 def conversation_to_response(
     conv: Conversation,
@@ -36,4 +38,5 @@ async def get_conversation_or_404(
             detail=f"Conversation {conversation_id} not found"
         )
     return conv
- 
+
+

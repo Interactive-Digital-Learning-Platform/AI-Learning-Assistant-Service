@@ -13,6 +13,7 @@ def create_assistant_graph(
     workflow = StateGraph(AgentState)
 
     workflow.add_node("load_memory", nodes.load_memory_node)
+    workflow.add_node("check_attachments", nodes.check_attachments_node)
     workflow.add_node("classify_intent", intent_service.classify_intent)
     workflow.add_node("rewrite_query", nodes.rewrite_query_node)
     workflow.add_node(

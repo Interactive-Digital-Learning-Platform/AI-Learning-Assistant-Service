@@ -8,15 +8,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from app.core.config import settings
+from app.models.attachment_model import Attachment
 from app.models.conversation_model import Conversation
 from app.models.message_model import Message, MessageRole
+from app.schemas.attachment import AttachmentPreview
 from app.schemas.conversation import (
     ChatRequest,
     ConversationCreate,
 )
 from app.schemas.message import MessageHistoryResponse
+from app.services.retrieval_service import RetrievalService
+from app.services.storage_service import StorageService
+from app.utils.attachment import IMAGE_CONTENT_TYPES
 from app.utils.conversation import conversation_to_response, get_conversation_or_404
-from app.utils.message import chat_stream_handler, message_to_response
+from app.utils.message import (
+    chat_stream_handler,
+    link_attachments_to_message,
+    message_to_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +93,24 @@ async def delete_conversation(
         session_service = request.app.state.session_service
         await session_service.clear(conversation_id)
 
+        attachment_result = await session.execute(
+            select(Attachment.storage_key).where(Attachment.conversation_id == conv.id)
+        )
+
+        storage_keys = [row[0] for row in attachment_result.all()]
+
+        attachment_retrieval_service: RetrievalService = request.app.state.attachment_retrieval_service
+        storage_service: StorageService = request.app.state.storage_service
+
+        await attachment_retrieval_service.delete_by_filter(
+            filters={
+                "conversation_id": conversation_id
+            }
+        )
+
+        for storage_key in storage_keys:
+            await storage_service.delete(storage_key)
+        
         await session.delete(conv)
         await session.commit()
         logger.info(f"Conversation deleted — id={conversation_id}")
@@ -125,6 +152,31 @@ async def get_messages(
 
         messages = list(reversed(messages))
 
+        message_ids = [m.id for m in messages]
+        attachments_by_message: dict = {}
+
+        if message_ids:
+            storage_service: StorageService = request.app.state.storage_service
+            attachment_result = await session.execute(
+                select(Attachment).where(Attachment.message_id.in_(message_ids))
+            )
+
+            for attachment in attachment_result.scalars().all():
+                preview_url = None
+
+                if attachment.content_type in IMAGE_CONTENT_TYPES:
+                    preview_url = await storage_service.get_preview_url(attachment.storage_key)
+
+                attachments_by_message.setdefault(attachment.message_id, []).append(
+                    AttachmentPreview(
+                        id=attachment.id,
+                        filename=attachment.filename,
+                        content_type=attachment.content_type,
+                        status=attachment.status,
+                        preview_url=preview_url
+                    )
+                )
+
         if not before:
             session_service = request.app.state.session_service
             warm_result = await session.execute(
@@ -141,7 +193,7 @@ async def get_messages(
         )
 
         return MessageHistoryResponse(
-            messages=[message_to_response(m) for m in messages],
+            messages=[message_to_response(m, attachments_by_message.get(m.id)) for m in messages],
             total=len(messages),
             has_more=has_more,
             next_cursor=next_cursor,
@@ -216,6 +268,10 @@ async def send_message(
         )
         session.add(user_msg)
         await session.flush()
+
+        await link_attachments_to_message(
+            session, request.attachment_ids, conversation_id, user_msg.id
+        )
 
         try:
             await session_service.append_message(

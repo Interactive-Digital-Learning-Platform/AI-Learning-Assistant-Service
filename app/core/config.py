@@ -45,5 +45,51 @@ class Settings(BaseSettings):
     LANGSMITH_API_KEY: str
     LANGSMITH_PROJECT: str
 
+    S3_ENDPOINT_URL: str
+    S3_ACCESS_KEY: str
+    S3_SECRET_KEY: str
+    S3_BUCKET: str = "user-attachments"
+    S3_REGION: str = "us-east-1"
+
+    MAX_ATTACHMENT_SIZE_MB: int = 20
+    ALLOWED_ATTACHMENT_TYPES: list[str] = [
+        "application/pdf",
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ]
+
+    ATTACHMENT_QDRANT_COLLECTION: str = "user_uploads"
+    ATTACHMENT_EMBEDDING_MODEL: str = "nomic-ai/nomic-embed-text-v1.5"
+    ATTACHMENT_TOP_K_CHUNKS: int = 5
+    ATTACHMENT_SCORE_THRESHOLD: float = 0.55
+
+    ATTACHMENT_INLINE_MAX_CHARS: int = 12_000
+    ATTACHMENT_INLINE_MAX_PDF_PAGES: int = 8
+    ATTACHMENT_MAX_PDF_PAGES: int = 50
+
+    ATTACHMENT_PREVIEW_URL_EXPIRES_SECONDS: int = 900
+
+    CLAMAV_HOST: str = "clamav"
+    CLAMAV_PORT: int = 3310
+    
+    ATTACHMENT_MALWARE_SCAN_ENABLED: bool = False
+
+    ATTACHMENT_MAX_RETRIES: int = 5
+    ATTACHMENT_INGEST_TIMEOUT_SECONDS: int = 180
+    ATTACHMENT_QUEUE_REDIS_DB: int = 1
+
+    ATTACHMENT_WAIT_TIMEOUT_SECONDS: int = 210
+    ATTACHMENT_WAIT_POLL_INTERVAL_SECONDS: float = 2.0
+
+    LLAMA_CLOUD_API_KEY: str
+
+    INTERNAL_SERVICE_KEY: str
+
+    PDF_INGESTION_SERVICE_BASE_URL: str
+
+    PDF_INGESTION_SERVICE_TIMEOUT_SECONDS: float = 30.0
+
 
 settings = Settings()

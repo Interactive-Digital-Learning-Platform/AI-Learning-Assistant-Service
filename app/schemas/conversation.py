@@ -33,6 +33,10 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = Field(default=None, description="ID of the conversation")
     message: str = Field(..., min_length=1, max_length=4000)
     user_id: str = Field(..., description="ID of the user sending the message")
+    attachment_ids: list[str] = Field(
+        default_factory=list,
+        description="Attachment ids uploaded earlier"
+    )
 
 
 class ChatResponse(BaseModel):
