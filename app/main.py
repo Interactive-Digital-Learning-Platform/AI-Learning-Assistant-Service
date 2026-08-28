@@ -29,6 +29,7 @@ from app.services.rerank_service import RerankService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_service import SessionService
 from app.services.storage_service import StorageService
+from app.services.translator_service import TranslatorService
 
 
 @asynccontextmanager
@@ -47,6 +48,7 @@ async def lifespan(app: FastAPI):
     )
     chat_service = ChatService(llm)
     intent_service = IntentService(llm)
+    translator_service = TranslatorService()
     storage_service = StorageService()
     inline_attachment_service = InlineAttachmentService(storage_service, attachment_ingestion_service)
     arq_pool = await create_arq_pool()
@@ -56,7 +58,8 @@ async def lifespan(app: FastAPI):
         session_service=session_service,
         retrieval_service=retrieval_service,
         attachment_retrieval_service=attachment_retrieval_service,
-        inline_attachment_service=inline_attachment_service
+        inline_attachment_service=inline_attachment_service,
+        translator_service=translator_service
     )
 
     assistant_graph = create_assistant_graph(
@@ -70,6 +73,7 @@ async def lifespan(app: FastAPI):
     app.state.attachment_retrieval_service = attachment_retrieval_service
     app.state.chat_service = chat_service
     app.state.intent_service = intent_service
+    app.state.translator_service = translator_service
     app.state.storage_service = storage_service
     app.state.assistant_graph = assistant_graph
     app.state.arq_pool = arq_pool

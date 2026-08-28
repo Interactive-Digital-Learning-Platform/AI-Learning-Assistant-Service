@@ -23,6 +23,14 @@ class AgentState(TypedDict):
     user_message: str
     history: list[BaseMessage]
 
+    language: str
+    source_language: str
+    reply_language: str
+    original_user_message: str
+    translated_response: str
+    translation_inbound_complete: bool
+    translation_failed: bool
+
     intent: Literal["general", "rag"]
 
     rewritten_query: str

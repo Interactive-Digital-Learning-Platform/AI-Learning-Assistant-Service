@@ -91,5 +91,13 @@ class Settings(BaseSettings):
 
     PDF_INGESTION_SERVICE_TIMEOUT_SECONDS: float = 30.0
 
+    AZURE_TRANSLATOR_KEY: str
+    AZURE_TRANSLATOR_ENDPOINT: str
+    AZURE_TRANSLATOR_REGION: str
+
+    TRANSLATION_ENABLED: bool = True
+    AZURE_TRANSLATOR_CHAR_LIMIT: int = 45000
+    AZURE_TRANSLATOR_DETECT_MIN_SCORE: float = 0.7
+
 
 settings = Settings()

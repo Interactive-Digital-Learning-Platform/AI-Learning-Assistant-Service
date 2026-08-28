@@ -41,34 +41,37 @@ Required external services (see `.env.example` for the full variable list): Post
 Two parallel entry points exist for sending a message in a conversation (`app/routes/chat_routes.py` → `app/controllers/chat_controllers.py`):
 
 - `POST /conversations/{id}/messages/stream` — SSE streaming path, drives the **LangGraph** workflow (`app/graph/`). This is the primary/current path.
-- `POST /conversations/{id}/messages` — non-streaming path, calls `ChatService` directly without going through the graph (retrieval → response in a straight line, no intent classification). Kept for simple/synchronous use cases.
+- `POST /conversations/{id}/messages` — non-streaming path, calls `ChatService` directly without going through the graph (retrieval → response in a straight line, no intent classification). Kept for simple/synchronous use cases. Applies the same `TranslatorService` pre/post the `ChatService` call as the graph does at its boundaries.
 
 ### LangGraph workflow (`app/graph/workflow.py`, `app/graph/nodes.py`)
 
 The streaming path runs a compiled `StateGraph` over `AgentState` (`app/schemas/agent_state.py`):
 
 ```
-START → load_memory → classify_intent →┬─(general)→ generate_response → END
-                                        └─(rag)→ rewrite_query → retrieve_docs → generate_response → END
+START → translate_input → load_memory → check_attachments → classify_intent
+        ┬─(general)→ generate_response → translate_output → END
+        └─(rag)→ rewrite_query → retrieve_docs → generate_response → translate_output → END
 ```
 
+- `translate_input` / `translate_output` (`GraphNodes.ai_translator_node`, `app/services/translator_service.py`): one handler wired at both boundaries. Inbound translates a Sinhala query to English (the graph is English-only) and resolves `reply_language`; outbound translates the English answer back to Sinhala into `translated_response` (the English `response` is what gets persisted). Language comes from `ChatRequest.language` ("English" default / "Sinhala"); a Sinhala-script query auto-triggers translation even when the selector says English (`app/utils/language.py::resolve_translation_plan`). Disabled by `TRANSLATION_ENABLED=false`.
 - `load_memory` (`GraphNodes`): pulls prior turns from Redis via `SessionService`.
+- `check_attachments` (`GraphNodes`): loads attachment status for the conversation and flags inline/groundable/pending attachments.
 - `classify_intent` (`IntentService`): structured-output LLM call classifying the query as `general` or `rag`, and uses `Command(goto=...)` to branch the graph directly (no separate conditional-edge function).
 - `rewrite_query` (`rag` path only): rewrites the latest message into a standalone search query using history.
 - `retrieve_docs`: vector search against Qdrant via `RetrievalService`, with a 15s timeout and a retry policy; retrieval failures are swallowed (falls back to empty context) so a Qdrant outage doesn't hard-fail the chat.
 - `generate_response`: builds the final answer with `ChatService`, selecting the RAG or general system prompt (`app/prompts/chat_prompts.py`) based on `state["intent"]`.
 
-The SSE handler (`app/utils/message.py::chat_stream_handler`) drives the graph with `astream_events(..., version="v3")`, streams tokens emitted specifically by the `generate_response` node, then reads the final graph state via `stream.output()` to get sources/intent/etc. for the persisted assistant message and the terminal `done` SSE event. A 90s overall timeout wraps the streaming loop.
+The SSE handler (`app/utils/message.py::chat_stream_handler`) drives the graph with `astream_events(..., version="v3")`, streams tokens emitted specifically by the `generate_response` node, then reads the final graph state via `stream.output()` to get sources/intent/etc. for the persisted assistant message and the terminal `done` SSE event. A 90s overall timeout wraps the streaming loop. When the reply will be Sinhala, live token streaming is suppressed and the fully translated answer is emitted as one `token` event before `done` (which also carries `translation_failed`). `Message.content` and the Redis history cache are always English (the only text any pipeline reads); the Sinhala display text is persisted next to it in `Message.translated_content` / `is_translated` and returned by the history endpoint so past Sinhala conversations render in Sinhala.
 
 ### Persistence model
 
-- **Postgres** (SQLAlchemy async ORM, `app/models/`): `Conversation` 1—N `Message`, source of truth for chat history. Messages store `message_metadata` (JSONB) containing `sources`, `rag_used`, `intent`, `rewritten_query`.
+- **Postgres** (SQLAlchemy async ORM, `app/models/`): `Conversation` 1—N `Message`, source of truth for chat history. Messages store `message_metadata` (JSONB) containing `sources`, `rag_used`, `intent`, `rewritten_query`. `content` is always English; `translated_content` + `is_translated` hold the optional Sinhala display text (see translation boundary above).
 - **Redis** (`SessionService`, `app/services/session_service.py`): short-lived (`HISTORY_TTL`) cache of the last `MAX_HISTORY_MESSAGES * 2` messages per conversation, keyed as `{KEY_PREFIX}:{conversation_id}:history`, used to reconstruct LangChain message history for the graph without hitting Postgres on every turn. `append_message` uses optimistic locking (`WATCH`/`MULTI`) with a retry loop. When a Redis cache is cold, `get_messages` (paginated history endpoint) re-warms it from Postgres.
 - **Qdrant** (`RetrievalService`): vector search over a single collection (`QDRANT_COLLECTION`), score-thresholded (`SCORE_THRESHOLD`), returning `SearchResult(text, score, metadata)`. Embeddings are produced by `EmbeddingGenerator` (`sentence-transformers`, prefixes queries with `"search_query: "`), and its output dimension is validated against `EMBEDDING_DIM` at startup — a mismatched embedding model will fail fast rather than silently corrupt search.
 
 ### Service wiring
 
-All services (`EmbeddingGenerator`, `SessionService`, `RetrievalService`, `ChatService`, `IntentService`) and the compiled graph are constructed once in `app/main.py`'s `lifespan` and stashed on `app.state`; controllers/handlers pull them from `Request.app.state` rather than via FastAPI `Depends`. Only the DB session is wired through `Depends(get_async_session)` (`app/core/database.py`).
+All services (`EmbeddingGenerator`, `SessionService`, `RetrievalService`, `ChatService`, `IntentService`, `TranslatorService`) and the compiled graph are constructed once in `app/main.py`'s `lifespan` and stashed on `app.state`; controllers/handlers pull them from `Request.app.state` rather than via FastAPI `Depends`. Only the DB session is wired through `Depends(get_async_session)` (`app/core/database.py`).
 
 ### Adding a new graph node/branch
 
