@@ -19,8 +19,10 @@ from app.schemas.conversation import (
 from app.schemas.message import MessageHistoryResponse
 from app.services.retrieval_service import RetrievalService
 from app.services.storage_service import StorageService
+from app.services.translator_service import TranslationError, TranslatorService
 from app.utils.attachment import IMAGE_CONTENT_TYPES
 from app.utils.conversation import conversation_to_response, get_conversation_or_404
+from app.utils.language import resolve_translation_plan
 from app.utils.message import (
     chat_stream_handler,
     link_attachments_to_message,
@@ -259,13 +261,32 @@ async def send_message(
         session_service = api_request.app.state.session_service
         retrieval = api_request.app.state.retrieval_service
         chat_service = api_request.app.state.chat_service
+        translator: TranslatorService = api_request.app.state.translator_service
+
+        plan = resolve_translation_plan(request.language, request.message)
+
+        try:
+            english_query = (
+                (await translator.to_english(request.message)).text or request.message
+                if plan.translate_inbound
+                else request.message
+            )
+        except TranslationError:
+            raise HTTPException(
+                status_code=502, detail="Translation service is unavailable"
+            )
 
         user_msg = Message(
             conversation_id=conv.id,
             role=MessageRole.USER,
-            content=request.message,
-            token_count=int(len(request.message.split()) * 1.3),
+            content=english_query,
+            token_count=int(len(english_query.split()) * 1.3),
         )
+
+        if english_query != request.message:
+            user_msg.translated_content = request.message
+            user_msg.is_translated = True
+
         session.add(user_msg)
         await session.flush()
 
@@ -275,12 +296,14 @@ async def send_message(
 
         try:
             await session_service.append_message(
-                conversation_id, "user", request.message
+                conversation_id, "user", english_query
             )
 
-            chunks = await retrieval.search(query=request.message)
+            chunks = await retrieval.search(query=english_query)
             history = await session_service.get_langchain_history(conversation_id)
-            response = await chat_service.get_response(request.message, history, chunks)
+            response = await chat_service.get_response(
+                english_query, history, chunks, mode="rag"
+            )
 
         except Exception as e:
             await session.rollback()
@@ -297,13 +320,28 @@ async def send_message(
             for c in chunks
         ]
 
+        translated_reply = ""
+        translation_failed = False
+
+        if plan.translate_outbound:
+            try:
+                translated_reply = await translator.to_sinhala(response)
+            except TranslationError:
+                logger.exception("Outbound translation failed; returning English")
+                translation_failed = True
+
         assistant_msg = Message(
             conversation_id=conv.id,
             role=MessageRole.ASSISTANT,
             content=response,
             token_count=int(len(response.split()) * 1.3),
-            metadata={"sources": sources, "rag_used": len(chunks) > 0},
+            message_metadata={"sources": sources, "rag_used": len(chunks) > 0},
         )
+
+        if translated_reply:
+            assistant_msg.translated_content = translated_reply
+            assistant_msg.is_translated = True
+
         session.add(assistant_msg)
         conv.updated_at = datetime.now(UTC)
         await session.commit()
@@ -311,7 +349,10 @@ async def send_message(
 
         await session_service.append_message(conversation_id, "assistant", response)
 
-        return message_to_response(assistant_msg)
+        result = message_to_response(assistant_msg)
+        result.translation_failed = translation_failed
+
+        return result
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

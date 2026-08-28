@@ -20,6 +20,7 @@ from app.schemas.conversation import ChatRequest
 from app.schemas.message import MessageResponse, SourceCitation
 from app.services.session_service import SessionService
 from app.utils.attachment import wait_for_attachments
+from app.utils.language import resolve_translation_plan
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,9 @@ def message_to_response(msg: Message, attachments: list[AttachmentPreview] | Non
         content=msg.content,
         created_at=msg.created_at,
         sources=sources,
-        attachments=attachments or []
+        attachments=attachments or [],
+        is_translated=bool(msg.is_translated),
+        translated_content=msg.translated_content,
     )
 
 async def link_attachments_to_message(
@@ -85,10 +88,13 @@ async def chat_stream_handler(
 
     full_response = ""
     final_state = None
-    
+
     conversation_id = str(conv.id)
     user_id = str(conv.user_id)
     committed = False
+
+    plan = resolve_translation_plan(request.language, request.message)
+    suppress_stream = plan.translate_outbound
 
     try:
         if is_new_conversation:
@@ -146,6 +152,13 @@ async def chat_stream_handler(
             "user_id": user_id,
             "user_message": request.message,
             "history": [],
+            "language": request.language,
+            "source_language": "",
+            "reply_language": plan.reply_language,
+            "original_user_message": "",
+            "translated_response": "",
+            "translation_inbound_complete": False,
+            "translation_failed": False,
             "intent": "general",
             "retrieved_chunks": [],
             "sources": [],
@@ -174,6 +187,10 @@ async def chat_stream_handler(
                 async for token in message.text:
                     if token:
                         full_response += token
+
+                        if suppress_stream:
+                            continue
+
                         yield {
                             "data": json.dumps({
                                 "type": "token",
@@ -186,39 +203,60 @@ async def chat_stream_handler(
         if final_state is None:
             raise RuntimeError("Graph finished without producing a final state")
 
-        if not full_response:
-            fallback_text = final_state.get("response") or ""
-            if fallback_text:
-                full_response = fallback_text
+        english_response = final_state.get("response") or full_response
+        translation_failed = final_state.get("translation_failed", False)
+        english_user_message = final_state.get("user_message") or request.message
+        translated_reply = final_state.get("translated_response") or ""
+
+        if suppress_stream:
+            display_text = translated_reply or english_response
+            if display_text:
                 yield {
                     "data": json.dumps({
                         "type": "token",
-                        "token": fallback_text,
+                        "token": display_text,
                     })
                 }
+        elif not full_response and english_response:
+            full_response = english_response
+            yield {
+                "data": json.dumps({
+                    "type": "token",
+                    "token": english_response,
+                })
+            }
 
         sources = final_state.get("sources", [])
 
+        if english_user_message != request.message:
+            user_message.content = english_user_message
+            user_message.translated_content = request.message
+            user_message.is_translated = True
+
         if not conv.title:
             conv.title = (
-                request.message[:97] + "..."
-                if len(request.message) > 100
-                else request.message
+                english_user_message[:97] + "..."
+                if len(english_user_message) > 100
+                else english_user_message
             )
 
-        
+
         assistant_msg = Message(
             conversation_id=conv.id,
             role=MessageRole.ASSISTANT,
-            content=final_state.get("response") or full_response,
+            content=english_response,
             token_count=int(len(full_response.split()) * 1.3),
-            metadata={
+            message_metadata={
                 "sources": sources,
                 "intent": final_state.get("intent"),
                 "rag_used": final_state.get("rag_used", False),
                 "rewritten_query": final_state.get("rewritten_query", ""),
             },
         )
+
+        if final_state.get("reply_language") == "Sinhala" and translated_reply:
+            assistant_msg.translated_content = translated_reply
+            assistant_msg.is_translated = True
 
         session.add(assistant_msg)
         conv.updated_at = datetime.now(UTC)
@@ -231,13 +269,13 @@ async def chat_stream_handler(
             await session_service.append_message(
                 conversation_id,
                 MessageRole.USER,
-                request.message
+                english_user_message
             )
 
             await session_service.append_message(
                 conversation_id,
                 MessageRole.ASSISTANT,
-                full_response
+                english_response
             )
 
         except Exception as e:
@@ -252,6 +290,7 @@ async def chat_stream_handler(
                     "type": "done",
                     "message_id": str(assistant_msg.id),
                     "sources": sources,
+                    "translation_failed": translation_failed,
                 }
             )
         }

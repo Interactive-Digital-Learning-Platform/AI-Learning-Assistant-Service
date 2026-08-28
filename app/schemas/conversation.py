@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -36,6 +36,10 @@ class ChatRequest(BaseModel):
     attachment_ids: list[str] = Field(
         default_factory=list,
         description="Attachment ids uploaded earlier"
+    )
+    language: Literal["English", "Sinhala"] = Field(
+        default="English",
+        description="Language selected in the chat input; sent with every query",
     )
 
 

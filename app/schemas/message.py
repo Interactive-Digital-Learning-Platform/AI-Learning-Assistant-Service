@@ -28,6 +28,9 @@ class MessageResponse(BaseModel):
     created_at: datetime
     sources: list[SourceCitation] = []
     attachments: list[AttachmentPreview] = []
+    is_translated: bool = False
+    translated_content: Optional[str] = None
+    translation_failed: bool = False
 
     class Config:
         from_attributes = True

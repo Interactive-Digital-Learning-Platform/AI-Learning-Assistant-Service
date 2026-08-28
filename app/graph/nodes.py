@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Literal
 from langgraph.types import Command
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.attachment_model import Attachment
 from app.schemas.agent_state import AgentState
@@ -18,6 +19,8 @@ from app.services.chat_service import ChatService
 from app.services.inline_attachment_service import InlineAttachmentService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_service import SessionService
+from app.services.translator_service import TranslationError, TranslatorService
+from app.utils.language import resolve_translation_plan
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +33,67 @@ class GraphNodes:
         attachment_retrieval_service: RetrievalService,
         inline_attachment_service: InlineAttachmentService,
         chat_service: ChatService,
+        translator_service: TranslatorService,
     ):
         self.session_service = session_service
         self.retrieval_service = retrieval_service
         self.attachment_retrieval_service = attachment_retrieval_service
         self.inline_attachment_service = inline_attachment_service
         self.chat_service = chat_service
+        self.translator_service = translator_service
+
+
+    async def ai_translator_node(self, state: AgentState) -> dict[str, Any]:
+        if not state.get("translation_inbound_complete"):
+            return await self._translate_inbound(state)
+
+        return await self._translate_outbound(state)
+
+
+    async def _translate_inbound(self, state: AgentState) -> dict[str, Any]:
+        selected = state.get("language") or "English"
+        original = state["user_message"]
+        plan = resolve_translation_plan(selected, original)
+
+        update: dict[str, Any] = {
+            "original_user_message": original,
+            "source_language": plan.source_language_hint,
+            "reply_language": plan.reply_language,
+            "translation_inbound_complete": True,
+        }
+
+        if plan.translate_inbound:
+            result = await self.translator_service.to_english(original)
+            update["user_message"] = result.text or original
+
+            if result.detected_language:
+                update["source_language"] = result.detected_language
+
+            if (
+                selected == "English"
+                and result.detected_language == "en"
+                and result.score >= settings.AZURE_TRANSLATOR_DETECT_MIN_SCORE
+            ):
+                update["reply_language"] = "English"
+
+        return update
+
+
+    async def _translate_outbound(self, state: AgentState) -> dict[str, Any]:
+        if state.get("reply_language") != "Sinhala":
+            return {}
+
+        response = state.get("response") or ""
+
+        if not response.strip():
+            return {}
+
+        try:
+            translated = await self.translator_service.to_sinhala(response)
+            return {"translated_response": translated}
+        except TranslationError:
+            logger.exception("Outbound translation failed; keeping English response")
+            return {"translation_failed": True}
 
 
     async def _safe_search(self, search_coro: Awaitable[list[SearchResult]]) -> list[SearchResult]:

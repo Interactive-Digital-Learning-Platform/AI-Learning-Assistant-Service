@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Text, false
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -25,6 +25,12 @@ class Message(Base):
 
     content: Mapped[str] = mapped_column(Text, nullable=False)
 
+    is_translated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+
+    translated_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
 
     message_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -45,6 +51,8 @@ class Message(Base):
             "conversation_id": str(self.conversation_id),
             "role": self.role.value,
             "content": self.content,
+            "is_translated": self.is_translated,
+            "translated_content": self.translated_content,
             "sources": sources,
             "created_at": self.created_at.isoformat(),
         }
