@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from app.schemas.attachment import AttachmentPreview
+
 
 class MessageRole(str, enum.Enum):
     USER = "user"
@@ -25,6 +27,7 @@ class MessageResponse(BaseModel):
     content: str
     created_at: datetime
     sources: list[SourceCitation] = []
+    attachments: list[AttachmentPreview] = []
 
     class Config:
         from_attributes = True

@@ -33,4 +33,8 @@ class AgentState(TypedDict):
     sources: list
     rag_used: bool
 
+    inline_attachment_ids: list[str]
+    has_attachments: bool
+    attachment_pending: bool
+
     error: NotRequired[str]

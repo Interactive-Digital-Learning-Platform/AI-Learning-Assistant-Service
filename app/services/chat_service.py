@@ -113,9 +113,7 @@ class ChatService:
         if not history:
             return RewrittenQuery(rewritten_query=user_query)
 
-        structured_llm = self.llm.with_structured_output(RewrittenQuery)
-
-        chain = query_rewrite_prompt | structured_llm
+        chain = query_rewrite_prompt | self.llm | self.parser
 
         try:
             result = await wait_for(
@@ -125,7 +123,9 @@ class ChatService:
                 timeout=15.0
             )
 
-            return result
+            rewritten = (result or "").strip().strip('"').strip()
+
+            return RewrittenQuery(rewritten_query=rewritten or user_query)
 
         except TimeoutError:
             logger.warning(
@@ -136,5 +136,5 @@ class ChatService:
             logger.exception(
                 "Query rewriting failed; using original user query"
             )
-            
-            return RewrittenQuery(rewritten_query=user_query)
+
+        return RewrittenQuery(rewritten_query=user_query)

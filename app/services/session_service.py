@@ -46,13 +46,11 @@ class SessionService:
         return lc_messages
 
     async def get_raw_history(self, conversation_id: str) -> list[dict]:
-        """Return raw list of {role, content} dicts — for debugging."""
         key = self._key(conversation_id)
         data = await self._redis.get(key)
         return json.loads(data) if data else []
 
     async def cache_exists(self, conversation_id: str) -> bool:
-        """Check whether this conversation has a warm cache."""
         return await self._redis.exists(self._key(conversation_id)) > 0
 
     async def append_message(

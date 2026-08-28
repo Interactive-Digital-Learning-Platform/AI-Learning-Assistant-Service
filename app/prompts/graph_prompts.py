@@ -42,6 +42,9 @@ query_rewrite_prompt = ChatPromptTemplate(
             Preserve meaning and important details.
             Do not answer or add information.
             If already standalone, return it unchanged.
+
+            Output only the rewritten query on one line. No quotes, no JSON,
+            no markdown, no explanation, no prefix.
             """.strip(),
         ),
         MessagesPlaceholder(variable_name="history"),

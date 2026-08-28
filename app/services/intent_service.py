@@ -14,6 +14,14 @@ class IntentService:
         self, state: AgentState
     ) -> Command[Literal["generate_response", "rewrite_query"]]:
 
+        if state.get("has_attachments"):
+            return Command(
+                update={
+                    "intent": "rag"
+                },
+                goto="rewrite_query"
+            )
+
         structured_llm = self.llm.with_structured_output(QueryClassification, method="json_mode")
 
         chain = classification_prompt | structured_llm
