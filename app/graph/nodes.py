@@ -213,7 +213,9 @@ class GraphNodes:
         }
 
 
-    async def retrieve_docs_node(self, state: AgentState) -> dict[str, Any]:
+    async def retrieve_docs_node(
+        self, state: AgentState
+    ) -> Command[Literal["web_search", "generate_response"]]:
         query = state["rewritten_query"] or state["user_message"]
 
         try:
@@ -235,7 +237,15 @@ class GraphNodes:
                 "Document retrieval failed; continuing without context"
             )
             chunks = []
-            
+
+        if not chunks and self.web_search_service.enabled:
+            logger.info(
+                "Retrieval returned no context; falling back to web search"
+            )
+            return Command(
+                update={"intent": "web_search"}, goto="web_search"
+            )
+
         sources = [
             {
                 "filename": c.metadata.get("filename", ""),
@@ -245,19 +255,23 @@ class GraphNodes:
             for c in chunks
         ]
 
-        return {
-            "sources": sources,
-            "context": chunks,
-            "retrieved_chunks": chunks,
-            "rag_used": True if state["intent"] == "rag" else False,
-        }
+        return Command(
+            update={
+                "sources": sources,
+                "context": chunks,
+                "retrieved_chunks": chunks,
+                "rag_used": bool(chunks) and state["intent"] == "rag",
+            },
+            goto="generate_response",
+        )
 
 
     async def generate_response_node(self, state: AgentState) -> dict[str, Any]:
         logger.info("Response node is reached")
             
         response = await self.chat_service.get_response(
-            message=state["rewritten_query"] or state["user_message"],
+            message=state["user_message"],
+            resolved_query=state["rewritten_query"],
             history=state["history"],
             context=state["context"],
             mode=state["intent"]

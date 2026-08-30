@@ -21,13 +21,15 @@ class RetrievalService:
         reranker: RerankService | None = None,
         collection: str = settings.QDRANT_COLLECTION,
         top_k: int = settings.TOP_K_CHUNKS,
-        threshold: float = settings.SCORE_THRESHOLD
+        threshold: float = settings.SCORE_THRESHOLD,
+        rerank_threshold: float = settings.RERANK_SCORE_THRESHOLD,
     ):
         self.client = AsyncQdrantClient(url=settings.QDRANT_URL)
         self.collection = collection
         self.embedder = embedder
         self.top_k = top_k
         self.threshold = threshold
+        self.rerank_threshold = rerank_threshold
         self.reranker = reranker
 
     async def search(
@@ -71,22 +73,30 @@ class RetrievalService:
                     metadata={k: v for k, v in payload.items() if k != "text"},
                 )
             )
-        reranked = await self.reranker.rerank(query, candidates, top_k=k) if self.reranker else candidates
-        
+        if self.reranker:
+            reranked = await self.reranker.rerank(query, candidates, top_k=k)
+            cutoff = self.rerank_threshold
+        else:
+            reranked = candidates
+            cutoff = self.threshold
+
+        results = [r for r in reranked if r.score >= cutoff]
+
         logger.info(
             f"Retrieval: query='{query[:50]}' "
-            f"→ {len(candidates)} results "
-            f"(threshold={self.threshold})"
+            f"→ {len(candidates)} candidates, {len(results)} above cutoff "
+            f"(cutoff={cutoff}, reranked={self.reranker is not None})"
         )
 
-        if candidates:
+        if results:
+            top = results[0]
             logger.debug(
-                f"  Top result: score={candidates[0].score} "
-                f"page={candidates[0].metadata.get('page_start')} "
-                f"file={candidates[0].metadata.get('filename')}"
+                f"  Top result: score={top.score} "
+                f"page={top.metadata.get('page_start')} "
+                f"file={top.metadata.get('filename')}"
             )
 
-        return [r for r in reranked if r.score >= self.threshold]
+        return results
 
 
     async def delete_by_filter(self, filters: dict[str, str]) -> None:

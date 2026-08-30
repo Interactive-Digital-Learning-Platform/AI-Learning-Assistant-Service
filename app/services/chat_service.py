@@ -21,14 +21,32 @@ logger = logging.getLogger(__name__)
 
 
 class ChatService:
-    def __init__(self, llm: BaseChatModel):
+    def __init__(self, llm: BaseChatModel, utility_llm: BaseChatModel | None = None):
         self.llm = llm
+        self._utility_llm = utility_llm or llm
         self.parser = StrOutputParser()
 
     def _prepare(
-        self, message: str, history: list, context: list[SearchResult], mode: str
+        self,
+        message: str,
+        history: list,
+        context: list[SearchResult],
+        mode: str,
+        resolved_query: str | None = None,
     ) -> tuple[Any, dict[str, Any]]:
-        input_vars: dict[str, Any] = {"history": history, "question": message}
+        question = message
+
+        if (
+            resolved_query
+            and resolved_query.strip()
+            and resolved_query.strip().lower() != message.strip().lower()
+        ):
+            question = (
+                f"{message}\n\n"
+                f"(Resolved form of this question, for reference: {resolved_query})"
+            )
+
+        input_vars: dict[str, Any] = {"history": history, "question": question}
 
         if mode == "rag":
             input_vars["context"] = self.format_context(context)
@@ -67,10 +85,15 @@ class ChatService:
             raise
 
     async def get_response(
-        self, message: str, history: list, context: list[SearchResult], mode: str
+        self,
+        message: str,
+        history: list,
+        context: list[SearchResult],
+        mode: str,
+        resolved_query: str | None = None,
     ):
 
-        prompt, input_vars = self._prepare(message, history, context, mode)
+        prompt, input_vars = self._prepare(message, history, context, mode, resolved_query)
 
         chain = prompt | self.llm | self.parser
 
@@ -103,9 +126,14 @@ class ChatService:
         total_chars = 0
 
         for i, chunk in enumerate(chunks, 1):
-            filename = chunk.metadata.get("filename", "unknown")
-            page = chunk.metadata.get("page_start", "?")
-            part = f"[Source {i} — {filename}, Page {page}]\n{chunk.text}"
+            filename = chunk.metadata.get("filename") or "the document"
+            page = chunk.metadata.get("page_start")
+            header = f"Excerpt {i} from {filename}"
+
+            if isinstance(page, int) and page > 0:
+                header += f", page {page}"
+
+            part = f"{header}:\n{chunk.text}"
 
             parts.append(part)
             total_chars += len(part)
@@ -130,8 +158,11 @@ class ChatService:
             title = chunk.metadata.get("title", "Untitled")
             url = chunk.metadata.get("url", "")
             published = chunk.metadata.get("published_date")
-            header = f"[Source {i} — {title} ({url})"
-            header += f", {published}]" if published else "]"
+            header = f"Web result {i}: {title} ({url})"
+
+            if published:
+                header += f" — {published}"
+
             part = f"{header}\n{chunk.text}"
 
             parts.append(part)
@@ -146,20 +177,17 @@ class ChatService:
         return "\n\n---\n\n".join(parts)
 
     async def rewrite_query(self, user_query: str, history: list[BaseMessage]):
-        if not history:
-            return RewrittenQuery(rewritten_query=user_query)
-
-        chain = query_rewrite_prompt | self.llm | self.parser
+        chain = query_rewrite_prompt | self._utility_llm | self.parser
 
         try:
             result = await wait_for(
                 chain.ainvoke(
-                    {"history": history, "user_query": user_query}
+                    {"history": history or [], "user_query": user_query}
                 ),
                 timeout=15.0
             )
 
-            rewritten = (result or "").strip().strip('"').strip()
+            rewritten = self._clean_rewrite(result)
 
             return RewrittenQuery(rewritten_query=rewritten or user_query)
 
@@ -174,3 +202,29 @@ class ChatService:
             )
 
         return RewrittenQuery(rewritten_query=user_query)
+
+    @staticmethod
+    def _clean_rewrite(raw: str | None) -> str:
+        text = (raw or "").strip().strip('"').strip()
+
+        if not text:
+            return text
+
+        prefixes = (
+            "rewritten question:",
+            "rewritten query:",
+            "standalone question:",
+            "standalone query:",
+            "here is the rewritten question:",
+            "here is the standalone question:",
+            "question:",
+            "query:",
+        )
+
+        lowered = text.lower()
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                text = text[len(prefix):].strip().strip('"').strip()
+                break
+
+        return text.splitlines()[0].strip() if text else text
