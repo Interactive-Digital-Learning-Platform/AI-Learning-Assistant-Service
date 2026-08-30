@@ -22,12 +22,15 @@ class Settings(BaseSettings):
     QDRANT_COLLECTION: str = "pdf_knowledge_base"
 
     TOP_K_CHUNKS: int = 5
-    SCORE_THRESHOLD: float = 0.6
+    SCORE_THRESHOLD: float = 0.4
+    RERANK_SCORE_THRESHOLD: float = 0.3
     MAX_HISTORY_MESSAGES: int = 10
-    
+
     GROQ_API_KEY: SecretStr
     GROQ_MODEL: str
     TEMPERATURE: float = 0.3
+
+    ASSISTANT_DOMAIN: str = "the Sri Lankan G.C.E. Ordinary Level syllabus (Grades 10-11)"
 
     REDIS_URL: str
     HISTORY_TTL: int = 3600

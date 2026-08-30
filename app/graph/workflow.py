@@ -32,7 +32,6 @@ def create_assistant_graph(
 
     workflow.add_edge(START, "translate_input")
     workflow.add_edge("translate_input", "load_memory")
-    workflow.add_edge("retrieve_docs", "generate_response")
     workflow.add_edge("web_search", "generate_response")
     workflow.add_edge("generate_response", "translate_output")
     workflow.add_edge("translate_output", END)

@@ -16,7 +16,7 @@ from redis.exceptions import RedisError
 
 from app.clients.mcp_client import MCPClientManager
 from app.core.arq import create_arq_pool
-from app.core.groq import llm
+from app.core.groq import llm, utility_llm
 from app.core.redis import redis_instance
 from app.graph.nodes import GraphNodes
 from app.graph.workflow import create_assistant_graph
@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
         top_k=settings.ATTACHMENT_TOP_K_CHUNKS,
         threshold=settings.ATTACHMENT_SCORE_THRESHOLD
     )
-    chat_service = ChatService(llm)
+    chat_service = ChatService(llm, utility_llm=utility_llm)
 
     mcp_client = MCPClientManager(
         url=settings.MCP_SERVER_URL,
@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
         max_results=settings.WEB_SEARCH_MAX_RESULTS,
     )
 
-    intent_service = IntentService(llm, web_search_enabled=web_search_service.enabled)
+    intent_service = IntentService(utility_llm, web_search_enabled=web_search_service.enabled)
     translator_service = TranslatorService()
     storage_service = StorageService()
     inline_attachment_service = InlineAttachmentService(storage_service, attachment_ingestion_service)
