@@ -15,9 +15,12 @@ class MessageRole(str, enum.Enum):
 
 
 class SourceCitation(BaseModel):
-    filename: str
-    page: int
-    score: float
+    filename: str = ""
+    page: int = 0
+    score: float = 0.0
+    title: Optional[str] = None
+    url: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class MessageResponse(BaseModel):

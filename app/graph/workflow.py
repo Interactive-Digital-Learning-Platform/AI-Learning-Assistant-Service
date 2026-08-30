@@ -23,12 +23,17 @@ def create_assistant_graph(
         nodes.retrieve_docs_node,
         retry_policy=RetryPolicy(max_attempts=2),
     )
+    workflow.add_node(
+        "web_search",
+        nodes.web_search_node,
+        retry_policy=RetryPolicy(max_attempts=2),
+    )
     workflow.add_node("generate_response", nodes.generate_response_node)
 
     workflow.add_edge(START, "translate_input")
     workflow.add_edge("translate_input", "load_memory")
-    workflow.add_edge("rewrite_query", "retrieve_docs")
     workflow.add_edge("retrieve_docs", "generate_response")
+    workflow.add_edge("web_search", "generate_response")
     workflow.add_edge("generate_response", "translate_output")
     workflow.add_edge("translate_output", END)
 
