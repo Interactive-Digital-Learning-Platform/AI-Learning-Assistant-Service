@@ -99,5 +99,12 @@ class Settings(BaseSettings):
     AZURE_TRANSLATOR_CHAR_LIMIT: int = 45000
     AZURE_TRANSLATOR_DETECT_MIN_SCORE: float = 0.7
 
+    WEB_SEARCH_ENABLED: bool = True
+    WEB_SEARCH_MAX_RESULTS: int = 5
+    MCP_SERVER_URL: str = "http://localhost:8006/mcp"
+    MCP_SERVER_AUTH_TOKEN: SecretStr | None = None
+    MCP_CLIENT_TIMEOUT_SECONDS: float = 20.0
+    MCP_TOOL_DISCOVERY_TIMEOUT_SECONDS: float = 10.0
+
 
 settings = Settings()

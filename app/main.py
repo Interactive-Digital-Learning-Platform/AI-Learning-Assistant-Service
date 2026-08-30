@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.exceptions import RedisError
 
+from app.clients.mcp_client import MCPClientManager
 from app.core.arq import create_arq_pool
 from app.core.groq import llm
 from app.core.redis import redis_instance
@@ -30,6 +31,7 @@ from app.services.retrieval_service import RetrievalService
 from app.services.session_service import SessionService
 from app.services.storage_service import StorageService
 from app.services.translator_service import TranslatorService
+from app.services.web_search_service import WebSearchService
 
 
 @asynccontextmanager
@@ -47,7 +49,28 @@ async def lifespan(app: FastAPI):
         threshold=settings.ATTACHMENT_SCORE_THRESHOLD
     )
     chat_service = ChatService(llm)
-    intent_service = IntentService(llm)
+
+    mcp_client = MCPClientManager(
+        url=settings.MCP_SERVER_URL,
+        auth_token=(
+            settings.MCP_SERVER_AUTH_TOKEN.get_secret_value()
+            if settings.MCP_SERVER_AUTH_TOKEN
+            else None
+        ),
+        timeout_seconds=settings.MCP_CLIENT_TIMEOUT_SECONDS,
+        discovery_timeout_seconds=settings.MCP_TOOL_DISCOVERY_TIMEOUT_SECONDS,
+    )
+
+    if settings.WEB_SEARCH_ENABLED:
+        await mcp_client.discover()
+
+    web_search_service = WebSearchService(
+        mcp_client.get_tool("web_search") if settings.WEB_SEARCH_ENABLED else None,
+        timeout_seconds=settings.MCP_CLIENT_TIMEOUT_SECONDS,
+        max_results=settings.WEB_SEARCH_MAX_RESULTS,
+    )
+
+    intent_service = IntentService(llm, web_search_enabled=web_search_service.enabled)
     translator_service = TranslatorService()
     storage_service = StorageService()
     inline_attachment_service = InlineAttachmentService(storage_service, attachment_ingestion_service)
@@ -59,7 +82,8 @@ async def lifespan(app: FastAPI):
         retrieval_service=retrieval_service,
         attachment_retrieval_service=attachment_retrieval_service,
         inline_attachment_service=inline_attachment_service,
-        translator_service=translator_service
+        translator_service=translator_service,
+        web_search_service=web_search_service,
     )
 
     assistant_graph = create_assistant_graph(
@@ -77,13 +101,16 @@ async def lifespan(app: FastAPI):
     app.state.storage_service = storage_service
     app.state.assistant_graph = assistant_graph
     app.state.arq_pool = arq_pool
-    
+    app.state.mcp_client = mcp_client
+    app.state.web_search_service = web_search_service
+
     try:
         await redis_instance.ping()
     except RedisError as e:
         raise RuntimeError("Failed to connect to Redis") from e
 
     yield
+    await mcp_client.aclose()
     await redis_instance.aclose()
 
 

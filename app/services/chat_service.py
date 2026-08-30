@@ -8,7 +8,11 @@ from langchain_core.messages import BaseMessage
 from langchain_core.output_parsers import StrOutputParser
 
 from app.core.config import settings
-from app.prompts.chat_prompts import general_system_prompt, rag_system_prompt
+from app.prompts.chat_prompts import (
+    general_system_prompt,
+    rag_system_prompt,
+    web_search_system_prompt,
+)
 from app.prompts.graph_prompts import query_rewrite_prompt
 from app.schemas.agent_state import RewrittenQuery
 from app.services.retrieval_service import SearchResult
@@ -21,6 +25,21 @@ class ChatService:
         self.llm = llm
         self.parser = StrOutputParser()
 
+    def _prepare(
+        self, message: str, history: list, context: list[SearchResult], mode: str
+    ) -> tuple[Any, dict[str, Any]]:
+        input_vars: dict[str, Any] = {"history": history, "question": message}
+
+        if mode == "rag":
+            input_vars["context"] = self.format_context(context)
+            return rag_system_prompt, input_vars
+
+        if mode == "web_search":
+            input_vars["context"] = self.format_web_context(context)
+            return web_search_system_prompt, input_vars
+
+        return general_system_prompt, input_vars
+
     async def stream_response(
         self,
         message: str,
@@ -29,14 +48,9 @@ class ChatService:
         mode: str
     ) -> AsyncGenerator[str, None]:
 
-        prompt = rag_system_prompt if mode == "rag" else general_system_prompt
+        prompt, input_vars = self._prepare(message, history, context, mode)
 
         chain = prompt | self.llm | self.parser
-
-        input_vars: dict[str, Any] = {"history": history, "question": message}
-
-        if mode == "rag":
-            input_vars["context"] = self.format_context(context)
 
         logger.info(
             f"Generating response — "
@@ -56,14 +70,9 @@ class ChatService:
         self, message: str, history: list, context: list[SearchResult], mode: str
     ):
 
-        prompt = rag_system_prompt if mode == "rag" else general_system_prompt
+        prompt, input_vars = self._prepare(message, history, context, mode)
 
         chain = prompt | self.llm | self.parser
-
-        input_vars: dict[str, Any] = {"history": history, "question": message}
-
-        if mode == "rag":
-            input_vars["context"] = self.format_context(context)
 
         logger.info(
             f"Generating response — "
@@ -104,6 +113,33 @@ class ChatService:
             if total_chars > settings.MAX_CONTEXT_CHARS:
                 logger.warning(
                     f"Context truncated at chunk {i} — exceeded {settings.MAX_CONTEXT_CHARS} chars"
+                )
+                break
+
+        return "\n\n---\n\n".join(parts)
+
+    @staticmethod
+    def format_web_context(chunks: list[SearchResult]) -> str:
+        if not chunks:
+            return ""
+
+        parts = []
+        total_chars = 0
+
+        for i, chunk in enumerate(chunks, 1):
+            title = chunk.metadata.get("title", "Untitled")
+            url = chunk.metadata.get("url", "")
+            published = chunk.metadata.get("published_date")
+            header = f"[Source {i} — {title} ({url})"
+            header += f", {published}]" if published else "]"
+            part = f"{header}\n{chunk.text}"
+
+            parts.append(part)
+            total_chars += len(part)
+
+            if total_chars > settings.MAX_CONTEXT_CHARS:
+                logger.warning(
+                    f"Web context truncated at chunk {i} — exceeded {settings.MAX_CONTEXT_CHARS} chars"
                 )
                 break
 

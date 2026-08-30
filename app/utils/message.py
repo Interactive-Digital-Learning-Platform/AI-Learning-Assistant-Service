@@ -32,6 +32,9 @@ def message_to_response(msg: Message, attachments: list[AttachmentPreview] | Non
             filename=s.get("filename", ""),
             page=s.get("page", 0),
             score=s.get("score", 0.0),
+            title=s.get("title"),
+            url=s.get("url"),
+            provider=s.get("provider"),
         )
         for s in meta.get("sources", [])
     ]
@@ -166,6 +169,7 @@ async def chat_stream_handler(
             "context": [],
             "response": "",
             "rag_used": False,
+            "web_search_used": False,
             "inline_attachment_ids": [],
             "has_attachments": False,
             "attachment_pending": False,
@@ -250,6 +254,7 @@ async def chat_stream_handler(
                 "sources": sources,
                 "intent": final_state.get("intent"),
                 "rag_used": final_state.get("rag_used", False),
+                "web_search_used": final_state.get("web_search_used", False),
                 "rewritten_query": final_state.get("rewritten_query", ""),
             },
         )

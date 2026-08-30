@@ -20,6 +20,7 @@ from app.services.inline_attachment_service import InlineAttachmentService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_service import SessionService
 from app.services.translator_service import TranslationError, TranslatorService
+from app.services.web_search_service import WebSearchService
 from app.utils.language import resolve_translation_plan
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ class GraphNodes:
         inline_attachment_service: InlineAttachmentService,
         chat_service: ChatService,
         translator_service: TranslatorService,
+        web_search_service: WebSearchService,
     ):
         self.session_service = session_service
         self.retrieval_service = retrieval_service
@@ -41,6 +43,7 @@ class GraphNodes:
         self.inline_attachment_service = inline_attachment_service
         self.chat_service = chat_service
         self.translator_service = translator_service
+        self.web_search_service = web_search_service
 
 
     async def ai_translator_node(self, state: AgentState) -> dict[str, Any]:
@@ -165,7 +168,9 @@ class GraphNodes:
         )
         
         
-    async def rewrite_query_node(self, state: AgentState) -> dict[str, Any]:
+    async def rewrite_query_node(
+        self, state: AgentState
+    ) -> Command[Literal["retrieve_docs", "web_search"]]:
         response = await self.chat_service.rewrite_query(
             user_query=state["user_message"], history=state["history"]
         )
@@ -174,8 +179,39 @@ class GraphNodes:
             f"Query rewritten: '{state['user_message']}' -> '{response.rewritten_query}'"
         )
 
-        return {"rewritten_query": response.rewritten_query}
-        
+        goto = "web_search" if state.get("intent") == "web_search" else "retrieve_docs"
+
+        return Command(
+            update={"rewritten_query": response.rewritten_query}, goto=goto
+        )
+
+
+    async def web_search_node(self, state: AgentState) -> dict[str, Any]:
+        query = state["rewritten_query"] or state["user_message"]
+
+        chunks = await self.web_search_service.search(query)
+
+        sources = [
+            {
+                "title": c.metadata.get("title", ""),
+                "url": c.metadata.get("url", ""),
+                "snippet": c.text[:300],
+                "provider": c.metadata.get("source"),
+                "score": c.score,
+            }
+            for c in chunks
+        ]
+
+        logger.info("Web search node produced %d results", len(chunks))
+
+        return {
+            "sources": sources,
+            "context": chunks,
+            "retrieved_chunks": chunks,
+            "rag_used": False,
+            "web_search_used": bool(chunks),
+        }
+
 
     async def retrieve_docs_node(self, state: AgentState) -> dict[str, Any]:
         query = state["rewritten_query"] or state["user_message"]

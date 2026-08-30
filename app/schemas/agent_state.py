@@ -8,7 +8,9 @@ from app.services.retrieval_service import SearchResult
 
 
 class QueryClassification(BaseModel):
-    intent: Literal["general", "rag"] = Field(description="The intent of the user query")
+    intent: Literal["general", "rag", "web_search"] = Field(
+        description="The intent of the user query"
+    )
 
 
 class RewrittenQuery(BaseModel):
@@ -31,7 +33,7 @@ class AgentState(TypedDict):
     translation_inbound_complete: bool
     translation_failed: bool
 
-    intent: Literal["general", "rag"]
+    intent: Literal["general", "rag", "web_search"]
 
     rewritten_query: str
     retrieved_chunks: list
@@ -40,6 +42,7 @@ class AgentState(TypedDict):
     response: str
     sources: list
     rag_used: bool
+    web_search_used: bool
 
     inline_attachment_ids: list[str]
     has_attachments: bool
