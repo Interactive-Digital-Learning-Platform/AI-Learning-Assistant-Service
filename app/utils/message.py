@@ -35,6 +35,7 @@ def message_to_response(msg: Message, attachments: list[AttachmentPreview] | Non
             title=s.get("title"),
             url=s.get("url"),
             provider=s.get("provider"),
+            snippet=s.get("snippet"),
         )
         for s in meta.get("sources", [])
     ]

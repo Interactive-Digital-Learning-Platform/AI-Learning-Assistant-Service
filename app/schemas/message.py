@@ -21,6 +21,7 @@ class SourceCitation(BaseModel):
     title: Optional[str] = None
     url: Optional[str] = None
     provider: Optional[str] = None
+    snippet: Optional[str] = None
 
 
 class MessageResponse(BaseModel):

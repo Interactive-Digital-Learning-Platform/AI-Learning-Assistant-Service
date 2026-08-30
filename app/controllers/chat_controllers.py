@@ -1,6 +1,7 @@
 import logging
 from datetime import UTC, datetime
 from typing import Optional
+from uuid import UUID
 
 from fastapi import HTTPException, Request
 from sqlalchemy import desc, func, select
@@ -201,6 +202,51 @@ async def get_messages(
             next_cursor=next_cursor,
         )
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def get_message(session: AsyncSession, message_id: str, request: Request):
+    try:
+        try:
+            message_uuid = UUID(message_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid message id")
+
+        result = await session.execute(
+            select(Message).where(Message.id == message_uuid)
+        )
+        message = result.scalar_one_or_none()
+
+        if message is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+
+        storage_service: StorageService = request.app.state.storage_service
+        attachment_result = await session.execute(
+            select(Attachment).where(Attachment.message_id == message.id)
+        )
+
+        attachments = []
+        for attachment in attachment_result.scalars().all():
+            preview_url = None
+            if attachment.content_type in IMAGE_CONTENT_TYPES:
+                preview_url = await storage_service.get_preview_url(
+                    attachment.storage_key
+                )
+            attachments.append(
+                AttachmentPreview(
+                    id=attachment.id,
+                    filename=attachment.filename,
+                    content_type=attachment.content_type,
+                    status=attachment.status,
+                    preview_url=preview_url,
+                )
+            )
+
+        return message_to_response(message, attachments)
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -33,6 +33,15 @@ async def list_conversations(
     return await chat_controllers.list_conversations(session, user_id, limit, offset)
 
 
+@router.get("/messages/{message_id}", response_model=MessageResponse)
+async def get_message(
+    message_id: str,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_async_session)],
+):
+    return await chat_controllers.get_message(session, message_id, request)
+
+
 @router.get("/{conversation_id}", response_model=ConversationResponse)
 async def get_conversation(
     conversation_id: str,
