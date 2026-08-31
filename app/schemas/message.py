@@ -24,6 +24,16 @@ class SourceCitation(BaseModel):
     snippet: Optional[str] = None
 
 
+class GeneratedDocument(BaseModel):
+    document_id: str
+    filename: str
+    mime_type: str = "application/pdf"
+    page_count: Optional[int] = None
+    download_url: Optional[str] = None
+    expires_at: Optional[str] = None
+    status: str = "completed"
+
+
 class MessageResponse(BaseModel):
     id: UUID
     conversation_id: UUID
@@ -31,6 +41,7 @@ class MessageResponse(BaseModel):
     content: str
     created_at: datetime
     sources: list[SourceCitation] = []
+    documents: list[GeneratedDocument] = []
     attachments: list[AttachmentPreview] = []
     is_translated: bool = False
     translated_content: Optional[str] = None

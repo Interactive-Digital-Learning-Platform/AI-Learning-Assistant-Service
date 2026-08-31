@@ -16,14 +16,26 @@ from app.schemas.attachment import (
 )
 from app.schemas.retrieval import SearchResult
 from app.services.chat_service import ChatService
+from app.services.document_service import DocumentService
 from app.services.inline_attachment_service import InlineAttachmentService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_service import SessionService
 from app.services.translator_service import TranslationError, TranslatorService
 from app.services.web_search_service import WebSearchService
 from app.utils.language import resolve_translation_plan
+from app.utils.rate_limit import TokenBucket
 
 logger = logging.getLogger(__name__)
+
+
+def _derive_document_title(body: str, *, fallback: str) -> str:
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            title = stripped[2:].strip()
+            if title:
+                return title[:200]
+    return fallback[:200]
 
 
 class GraphNodes:
@@ -36,6 +48,7 @@ class GraphNodes:
         chat_service: ChatService,
         translator_service: TranslatorService,
         web_search_service: WebSearchService,
+        document_service: DocumentService,
     ):
         self.session_service = session_service
         self.retrieval_service = retrieval_service
@@ -44,6 +57,8 @@ class GraphNodes:
         self.chat_service = chat_service
         self.translator_service = translator_service
         self.web_search_service = web_search_service
+        self.document_service = document_service
+        self._document_limiter = TokenBucket(settings.DOCUMENT_USER_RATE_LIMIT_PER_MIN)
 
 
     async def ai_translator_node(self, state: AgentState) -> dict[str, Any]:
@@ -266,15 +281,57 @@ class GraphNodes:
         )
 
 
+    async def generate_document_node(self, state: AgentState) -> dict[str, Any]:
+        topic = state["user_message"]
+        user_id = state.get("user_id") or "default"
+
+        if not self._document_limiter.allow(user_id):
+            logger.warning("PDF generation rate limited for user_id=%s", user_id)
+            return {
+                "documents": [],
+                "document_status": "rate_limited",
+                "document_title": topic[:80],
+            }
+
+        try:
+            body = await self.chat_service.generate_document_body(topic, state["history"])
+        except Exception:
+            logger.exception("Document body generation failed")
+            return {
+                "documents": [],
+                "document_status": "failed",
+                "document_title": topic[:80],
+            }
+
+        title = _derive_document_title(body, fallback=topic)
+
+        result = await self.document_service.generate(title=title, markdown_body=body)
+
+        if not result or result.get("status") != "completed":
+            return {
+                "documents": [],
+                "document_status": "failed",
+                "document_title": title,
+            }
+
+        return {
+            "documents": [result],
+            "document_status": "completed",
+            "document_title": result.get("filename") or title,
+        }
+
+
     async def generate_response_node(self, state: AgentState) -> dict[str, Any]:
         logger.info("Response node is reached")
-            
+
         response = await self.chat_service.get_response(
             message=state["user_message"],
             resolved_query=state["rewritten_query"],
             history=state["history"],
             context=state["context"],
-            mode=state["intent"]
+            mode=state["intent"],
+            document_title=state.get("document_title", ""),
+            document_status=state.get("document_status", ""),
         )
 
         return {"response": response}

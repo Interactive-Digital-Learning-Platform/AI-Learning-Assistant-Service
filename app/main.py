@@ -24,6 +24,7 @@ from app.routes.attachment_routes import router as attachment_router
 from app.routes.chat_routes import router as chat_router
 from app.routes.webhook_routes import router as webhook_router
 from app.services.chat_service import ChatService
+from app.services.document_service import DocumentService
 from app.services.embedding_service import EmbeddingGenerator
 from app.services.intent_service import IntentService
 from app.services.rerank_service import RerankService
@@ -61,7 +62,7 @@ async def lifespan(app: FastAPI):
         discovery_timeout_seconds=settings.MCP_TOOL_DISCOVERY_TIMEOUT_SECONDS,
     )
 
-    if settings.WEB_SEARCH_ENABLED:
+    if settings.WEB_SEARCH_ENABLED or settings.PDF_GENERATION_ENABLED:
         await mcp_client.discover()
 
     web_search_service = WebSearchService(
@@ -70,7 +71,17 @@ async def lifespan(app: FastAPI):
         max_results=settings.WEB_SEARCH_MAX_RESULTS,
     )
 
-    intent_service = IntentService(utility_llm, web_search_enabled=web_search_service.enabled)
+    document_service = DocumentService(
+        mcp_client.get_tool("generate_pdf") if settings.PDF_GENERATION_ENABLED else None,
+        timeout_seconds=settings.DOCUMENT_MCP_TIMEOUT_SECONDS,
+        max_body_chars=settings.DOCUMENT_MAX_BODY_CHARS,
+    )
+
+    intent_service = IntentService(
+        utility_llm,
+        web_search_enabled=web_search_service.enabled,
+        pdf_generation_enabled=document_service.enabled,
+    )
     translator_service = TranslatorService()
     storage_service = StorageService()
     inline_attachment_service = InlineAttachmentService(storage_service, attachment_ingestion_service)
@@ -84,6 +95,7 @@ async def lifespan(app: FastAPI):
         inline_attachment_service=inline_attachment_service,
         translator_service=translator_service,
         web_search_service=web_search_service,
+        document_service=document_service,
     )
 
     assistant_graph = create_assistant_graph(
@@ -103,6 +115,7 @@ async def lifespan(app: FastAPI):
     app.state.arq_pool = arq_pool
     app.state.mcp_client = mcp_client
     app.state.web_search_service = web_search_service
+    app.state.document_service = document_service
 
     try:
         await redis_instance.ping()

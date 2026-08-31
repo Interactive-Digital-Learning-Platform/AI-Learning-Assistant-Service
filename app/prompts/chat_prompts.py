@@ -74,3 +74,57 @@ general_system_prompt = ChatPromptTemplate.from_messages(
         ("human", "{question}"),
     ]
 )
+
+document_body_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            _ROLE
+            + "\n\n"
+            + """The user has asked you to create a downloadable study document. Write the
+            full document content as clean GitHub-flavoured Markdown.
+
+            Structure:
+            - Start with a single level-1 heading: the document title on its own line.
+            - Use level-2 headings for sections, with short paragraphs, bullet or numbered
+              lists, and simple tables where they help.
+            - Include short worked examples where the topic calls for them.
+            - End with a "## Summary" section covering the key points.
+
+            Rules:
+            - Output only the Markdown document. No preamble such as "Here is your document",
+              no closing remarks, and no code fence wrapping the whole thing.
+            - Do not call any tools or functions. Produce the document as Markdown text only.
+            - Do not include any URLs, links, or a table of contents.
+            - Keep it exam-relevant and age-appropriate for the syllabus above.
+            """,
+        ),
+        MessagesPlaceholder("history"),
+        ("human", "{question}"),
+    ]
+)
+
+document_system_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            _ROLE
+            + "\n\n"
+            + """The user asked for a downloadable document and it has been prepared for them.
+            Its title is "{document_title}" and its status is "{document_status}".
+
+            Write a short chat reply of one or two sentences:
+            - If the status is "completed": tell the user the document is ready and available
+              to download below, refer to it by its title, and mention the main topics it
+              covers.
+            - If the status is anything else: apologise briefly, say the document could not be
+              generated this time, and offer to try again.
+
+            Do not include any URL or download link, and do not write the word "link" followed
+            by an address. Do not reproduce the document contents.
+            """,
+        ),
+        MessagesPlaceholder("history"),
+        ("human", "{question}"),
+    ]
+)

@@ -106,8 +106,14 @@ class Settings(BaseSettings):
     WEB_SEARCH_MAX_RESULTS: int = 5
     MCP_SERVER_URL: str = "http://localhost:8006/mcp"
     MCP_SERVER_AUTH_TOKEN: SecretStr | None = None
-    MCP_CLIENT_TIMEOUT_SECONDS: float = 20.0
+    MCP_CLIENT_TIMEOUT_SECONDS: float = 45.0
     MCP_TOOL_DISCOVERY_TIMEOUT_SECONDS: float = 10.0
+
+    PDF_GENERATION_ENABLED: bool = False
+    DOCUMENT_BODY_TIMEOUT_SECONDS: float = 30.0
+    DOCUMENT_MCP_TIMEOUT_SECONDS: float = 40.0
+    DOCUMENT_MAX_BODY_CHARS: int = 20_000
+    DOCUMENT_USER_RATE_LIMIT_PER_MIN: int = 5
 
 
 settings = Settings()
