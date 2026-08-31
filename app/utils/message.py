@@ -17,12 +17,14 @@ from app.schemas.attachment import (
     AttachmentPreview,
 )
 from app.schemas.conversation import ChatRequest
-from app.schemas.message import MessageResponse, SourceCitation
+from app.schemas.message import GeneratedDocument, MessageResponse, SourceCitation
 from app.services.session_service import SessionService
 from app.utils.attachment import wait_for_attachments
 from app.utils.language import resolve_translation_plan
 
 logger = logging.getLogger(__name__)
+
+_PDF_INTERIM_TOKEN = "Creating your PDF…\n\n"
 
 
 def message_to_response(msg: Message, attachments: list[AttachmentPreview] | None = None) -> MessageResponse:
@@ -39,6 +41,18 @@ def message_to_response(msg: Message, attachments: list[AttachmentPreview] | Non
         )
         for s in meta.get("sources", [])
     ]
+    documents = [
+        GeneratedDocument(
+            document_id=d.get("document_id", ""),
+            filename=d.get("filename", ""),
+            mime_type=d.get("mime_type", "application/pdf"),
+            page_count=d.get("page_count"),
+            download_url=d.get("download_url"),
+            expires_at=d.get("expires_at"),
+            status=d.get("status", "completed"),
+        )
+        for d in meta.get("documents", [])
+    ]
     return MessageResponse(
         id=msg.id,
         conversation_id=msg.conversation_id,
@@ -46,6 +60,7 @@ def message_to_response(msg: Message, attachments: list[AttachmentPreview] | Non
         content=msg.content,
         created_at=msg.created_at,
         sources=sources,
+        documents=documents,
         attachments=attachments or [],
         is_translated=bool(msg.is_translated),
         translated_content=msg.translated_content,
@@ -171,6 +186,9 @@ async def chat_stream_handler(
             "response": "",
             "rag_used": False,
             "web_search_used": False,
+            "documents": [],
+            "document_status": "",
+            "document_title": "",
             "inline_attachment_ids": [],
             "has_attachments": False,
             "attachment_pending": False,
@@ -182,13 +200,30 @@ async def chat_stream_handler(
             version="v3"
         )
 
-        async with asyncio.timeout(90.0):
+        interim_sent = False
+
+        async with asyncio.timeout(120.0):
             async for message in stream.messages:
                 logger.info(f"Message object: {message}")
-    
+
+                if message.node == "generate_document":
+                    if not interim_sent and not suppress_stream:
+                        interim_sent = True
+                        yield {
+                            "data": json.dumps({
+                                "type": "token",
+                                "token": _PDF_INTERIM_TOKEN,
+                            })
+                        }
+
+                    async for _ in message.text:
+                        pass
+
+                    continue
+
                 if message.node != "generate_response":
                     continue
-    
+
                 async for token in message.text:
                     if token:
                         full_response += token
@@ -232,6 +267,7 @@ async def chat_stream_handler(
             }
 
         sources = final_state.get("sources", [])
+        documents = final_state.get("documents", [])
 
         if english_user_message != request.message:
             user_message.content = english_user_message
@@ -253,9 +289,11 @@ async def chat_stream_handler(
             token_count=int(len(full_response.split()) * 1.3),
             message_metadata={
                 "sources": sources,
+                "documents": documents,
                 "intent": final_state.get("intent"),
                 "rag_used": final_state.get("rag_used", False),
                 "web_search_used": final_state.get("web_search_used", False),
+                "document_status": final_state.get("document_status", ""),
                 "rewritten_query": final_state.get("rewritten_query", ""),
             },
         )
@@ -296,6 +334,7 @@ async def chat_stream_handler(
                     "type": "done",
                     "message_id": str(assistant_msg.id),
                     "sources": sources,
+                    "documents": documents,
                     "translation_failed": translation_failed,
                 }
             )

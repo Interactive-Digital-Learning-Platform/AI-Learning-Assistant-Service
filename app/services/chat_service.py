@@ -9,6 +9,8 @@ from langchain_core.output_parsers import StrOutputParser
 
 from app.core.config import settings
 from app.prompts.chat_prompts import (
+    document_body_prompt,
+    document_system_prompt,
     general_system_prompt,
     rag_system_prompt,
     web_search_system_prompt,
@@ -33,6 +35,8 @@ class ChatService:
         context: list[SearchResult],
         mode: str,
         resolved_query: str | None = None,
+        document_title: str = "",
+        document_status: str = "",
     ) -> tuple[Any, dict[str, Any]]:
         question = message
 
@@ -55,6 +59,11 @@ class ChatService:
         if mode == "web_search":
             input_vars["context"] = self.format_web_context(context)
             return web_search_system_prompt, input_vars
+
+        if mode == "generate_pdf":
+            input_vars["document_title"] = document_title or "your document"
+            input_vars["document_status"] = document_status or "completed"
+            return document_system_prompt, input_vars
 
         return general_system_prompt, input_vars
 
@@ -91,9 +100,19 @@ class ChatService:
         context: list[SearchResult],
         mode: str,
         resolved_query: str | None = None,
+        document_title: str = "",
+        document_status: str = "",
     ):
 
-        prompt, input_vars = self._prepare(message, history, context, mode, resolved_query)
+        prompt, input_vars = self._prepare(
+            message,
+            history,
+            context,
+            mode,
+            resolved_query,
+            document_title,
+            document_status,
+        )
 
         chain = prompt | self.llm | self.parser
 
@@ -115,7 +134,14 @@ class ChatService:
         except Exception as e:
             logger.exception(f"LLM response generation error: {e}")
             raise
-            
+
+    async def generate_document_body(self, topic: str, history: list) -> str:
+        chain = document_body_prompt | self.llm | self.parser
+
+        return await wait_for(
+            chain.ainvoke({"history": history or [], "question": topic}),
+            timeout=settings.DOCUMENT_BODY_TIMEOUT_SECONDS,
+        )
 
     @staticmethod
     def format_context(chunks: list[SearchResult]) -> str:
