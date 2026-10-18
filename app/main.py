@@ -30,7 +30,9 @@ from app.services.intent_service import IntentService
 from app.services.rerank_service import RerankService
 from app.services.retrieval_service import RetrievalService
 from app.services.session_service import SessionService
+from app.services.sparse_embedding_service import SparseEmbeddingGenerator
 from app.services.storage_service import StorageService
+from app.services.title_service import TitleService
 from app.services.translator_service import TranslatorService
 from app.services.web_search_service import WebSearchService
 
@@ -41,7 +43,10 @@ async def lifespan(app: FastAPI):
     session_service = SessionService()
     rerank_service = RerankService()
     attachment_ingestion_service = AttachmentIngestionService()
-    retrieval_service = RetrievalService(embedder=embedder, reranker=rerank_service)
+    sparse_embedder = SparseEmbeddingGenerator() if settings.HYBRID_SEARCH_ENABLED else None
+    retrieval_service = RetrievalService(
+        embedder=embedder, reranker=rerank_service, sparse_embedder=sparse_embedder
+    )
     attachment_retrieval_service = RetrievalService(
         embedder=embedder,
         reranker=None,
@@ -49,6 +54,8 @@ async def lifespan(app: FastAPI):
         top_k=settings.ATTACHMENT_TOP_K_CHUNKS,
         threshold=settings.ATTACHMENT_SCORE_THRESHOLD
     )
+    await retrieval_service.startup()
+    await attachment_retrieval_service.startup()
     chat_service = ChatService(llm, utility_llm=utility_llm)
 
     mcp_client = MCPClientManager(
@@ -83,6 +90,7 @@ async def lifespan(app: FastAPI):
         pdf_generation_enabled=document_service.enabled,
     )
     translator_service = TranslatorService()
+    title_service = TitleService(utility_llm, translator_service)
     storage_service = StorageService()
     inline_attachment_service = InlineAttachmentService(storage_service, attachment_ingestion_service)
     arq_pool = await create_arq_pool()
@@ -110,6 +118,7 @@ async def lifespan(app: FastAPI):
     app.state.chat_service = chat_service
     app.state.intent_service = intent_service
     app.state.translator_service = translator_service
+    app.state.title_service = title_service
     app.state.storage_service = storage_service
     app.state.assistant_graph = assistant_graph
     app.state.arq_pool = arq_pool

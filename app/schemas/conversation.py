@@ -41,6 +41,12 @@ class ChatRequest(BaseModel):
         default="English",
         description="Language selected in the chat input; sent with every query",
     )
+    grade: int | None = Field(
+        default=None,
+        ge=1,
+        le=13,
+        description="The student's school grade; course material from it and the grade before is searched first",
+    )
 
 
 class ChatResponse(BaseModel):

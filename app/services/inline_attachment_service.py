@@ -1,5 +1,7 @@
 import logging
+from asyncio import wait_for
 
+from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.attachment_model import Attachment
 from app.schemas.attachment import AttachmentStatus
@@ -33,13 +35,11 @@ class InlineAttachmentService:
         if attachment.status != AttachmentStatus.READY_INLINE:
             return None
 
-        content = await self.storage_service.download(attachment.storage_key)
+        text = attachment.extracted_text
+        extraction_method = attachment.extraction_method or "llama_parse"
 
-        text, extraction_method = await self.ingestion_service.extract_text(
-            filename=attachment.filename,
-            content=content,
-            content_type=attachment.content_type
-        )
+        if text is None:
+            text, extraction_method = await self._extract_and_store(attachment)
 
         if not text:
             return None
@@ -53,3 +53,31 @@ class InlineAttachmentService:
                 "source": extraction_method
             }
         )
+
+
+    async def _extract_and_store(self, attachment: Attachment) -> tuple[str, str]:
+        logger.info(
+            "No stored text for inline attachment_id=%s; extracting it once", attachment.id
+        )
+
+        content = await self.storage_service.download(attachment.storage_key)
+
+        text, extraction_method = await wait_for(
+            self.ingestion_service.extract_text(
+                filename=attachment.filename,
+                content=content,
+                content_type=attachment.content_type
+            ),
+            timeout=settings.ATTACHMENT_INLINE_PARSE_TIMEOUT_SECONDS,
+        )
+
+        if text:
+            async with async_session_maker() as session:
+                stored = await session.get(Attachment, attachment.id)
+
+                if stored is not None:
+                    stored.extracted_text = text
+                    stored.extraction_method = extraction_method
+                    await session.commit()
+
+        return text, extraction_method

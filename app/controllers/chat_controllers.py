@@ -20,8 +20,10 @@ from app.schemas.conversation import (
 from app.schemas.message import MessageHistoryResponse
 from app.services.retrieval_service import RetrievalService
 from app.services.storage_service import StorageService
+from app.services.title_service import TitleService
 from app.services.translator_service import TranslationError, TranslatorService
 from app.utils.attachment import IMAGE_CONTENT_TYPES
+from app.utils.citations import source_list
 from app.utils.conversation import conversation_to_response, get_conversation_or_404
 from app.utils.language import resolve_translation_plan
 from app.utils.message import (
@@ -278,6 +280,7 @@ async def stream_message(
                 session,
                 api_request.app.state.assistant_graph,
                 api_request.app.state.session_service,
+                api_request.app.state.title_service,
                 is_new_conversation
             ),
             media_type="text/event-stream",
@@ -308,6 +311,7 @@ async def send_message(
         retrieval = api_request.app.state.retrieval_service
         chat_service = api_request.app.state.chat_service
         translator: TranslatorService = api_request.app.state.translator_service
+        title_service: TitleService = api_request.app.state.title_service
 
         plan = resolve_translation_plan(request.language, request.message)
 
@@ -347,9 +351,10 @@ async def send_message(
 
             chunks = await retrieval.search(query=english_query)
             history = await session_service.get_langchain_history(conversation_id)
-            response = await chat_service.get_response(
+            raw_response = await chat_service.get_response(
                 english_query, history, chunks, mode="rag"
             )
+            response, cited = chat_service.finalize_citations(raw_response, chunks, "rag")
 
         except Exception as e:
             await session.rollback()
@@ -358,13 +363,9 @@ async def send_message(
                 status_code=500, detail="Failed to generate the response"
             )
 
-        sources = [
-            {
-                "page": c.metadata.get("page_start", 0),
-                "score": c.score,
-            }
-            for c in chunks
-        ]
+        sources = source_list(
+            cited or chat_service.included_excerpts(chunks, "rag"), "rag"
+        )
 
         translated_reply = ""
         translation_failed = False
@@ -388,6 +389,11 @@ async def send_message(
             assistant_msg.translated_content = translated_reply
             assistant_msg.is_translated = True
 
+        if not conv.title:
+            conv.title = await title_service.generate(
+                english_query, response, reply_language=plan.reply_language
+            )
+
         session.add(assistant_msg)
         conv.updated_at = datetime.now(UTC)
         await session.commit()
@@ -397,6 +403,7 @@ async def send_message(
 
         result = message_to_response(assistant_msg)
         result.translation_failed = translation_failed
+        result.conversation_title = conv.title
 
         return result
 

@@ -7,6 +7,7 @@ from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.attachment_model import Attachment
 from app.models.conversation_model import Conversation
 from app.models.message_model import Message, MessageRole
@@ -19,7 +20,9 @@ from app.schemas.attachment import (
 from app.schemas.conversation import ChatRequest
 from app.schemas.message import GeneratedDocument, MessageResponse, SourceCitation
 from app.services.session_service import SessionService
+from app.services.title_service import TitleService
 from app.utils.attachment import wait_for_attachments
+from app.utils.citations import CitationStreamFilter
 from app.utils.language import resolve_translation_plan
 
 logger = logging.getLogger(__name__)
@@ -102,6 +105,7 @@ async def chat_stream_handler(
     session: AsyncSession,
     assistant_graph: CompiledStateGraph,
     session_service: SessionService,
+    title_service: TitleService,
     is_new_conversation: bool = False
 ):
 
@@ -170,6 +174,7 @@ async def chat_stream_handler(
             "conversation_id": conversation_id,
             "user_id": user_id,
             "user_message": request.message,
+            "user_message_id": str(user_message.id),
             "history": [],
             "language": request.language,
             "source_language": "",
@@ -181,8 +186,16 @@ async def chat_stream_handler(
             "intent": "general",
             "retrieved_chunks": [],
             "sources": [],
+            "citation_count": 0,
+            "citation_fallback": False,
             "rewritten_query": "",
+            "sub_queries": [],
+            "grade": request.grade,
+            "subject": None,
+            "retrieval_scope": {},
             "context": [],
+            "retrieval_status": "skipped",
+            "retrieval_best_score": None,
             "response": "",
             "rag_used": False,
             "web_search_used": False,
@@ -190,8 +203,11 @@ async def chat_stream_handler(
             "document_status": "",
             "document_title": "",
             "inline_attachment_ids": [],
+            "attachment_names": {},
             "has_attachments": False,
+            "message_has_attachments": False,
             "attachment_pending": False,
+            "unavailable_attachments": [],
             "error": ""
         }
 
@@ -224,6 +240,10 @@ async def chat_stream_handler(
                 if message.node != "generate_response":
                     continue
 
+                citation_filter = CitationStreamFilter(
+                    visible=settings.CITATION_MARKERS_VISIBLE
+                )
+
                 async for token in message.text:
                     if token:
                         full_response += token
@@ -231,12 +251,25 @@ async def chat_stream_handler(
                         if suppress_stream:
                             continue
 
-                        yield {
-                            "data": json.dumps({
-                                "type": "token",
-                                "token": token,
-                            })
-                        }
+                        visible_text = citation_filter.feed(token)
+
+                        if visible_text:
+                            yield {
+                                "data": json.dumps({
+                                    "type": "token",
+                                    "token": visible_text,
+                                })
+                            }
+
+                remaining = citation_filter.flush()
+
+                if remaining and not suppress_stream:
+                    yield {
+                        "data": json.dumps({
+                            "type": "token",
+                            "token": remaining,
+                        })
+                    }
 
         final_state = await stream.output()
 
@@ -275,12 +308,11 @@ async def chat_stream_handler(
             user_message.is_translated = True
 
         if not conv.title:
-            conv.title = (
-                english_user_message[:97] + "..."
-                if len(english_user_message) > 100
-                else english_user_message
+            conv.title = await title_service.generate(
+                english_user_message,
+                english_response,
+                reply_language=final_state.get("reply_language", "English"),
             )
-
 
         assistant_msg = Message(
             conversation_id=conv.id,
@@ -295,6 +327,11 @@ async def chat_stream_handler(
                 "web_search_used": final_state.get("web_search_used", False),
                 "document_status": final_state.get("document_status", ""),
                 "rewritten_query": final_state.get("rewritten_query", ""),
+                "retrieval_status": final_state.get("retrieval_status", "skipped"),
+                "retrieval_best_score": final_state.get("retrieval_best_score"),
+                "retrieval_scope": final_state.get("retrieval_scope", {}),
+                "citation_count": final_state.get("citation_count", 0),
+                "citation_fallback": final_state.get("citation_fallback", False),
             },
         )
 
@@ -336,6 +373,7 @@ async def chat_stream_handler(
                     "sources": sources,
                     "documents": documents,
                     "translation_failed": translation_failed,
+                    "conversation_title": conv.title,
                 }
             )
         }
@@ -343,7 +381,11 @@ async def chat_stream_handler(
         logger.info(
             f"Message complete — conversation={conversation_id} "
             f"rag={final_state.get('rag_used', False)} "
-            f"intent={final_state.get('intent')}"
+            f"intent={final_state.get('intent')} "
+            f"retrieval_status={final_state.get('retrieval_status')} "
+            f"best_score={final_state.get('retrieval_best_score')} "
+            f"citations={final_state.get('citation_count', 0)} "
+            f"citation_fallback={final_state.get('citation_fallback', False)} "
             f"chunks={len(final_state.get('retrieved_chunks', []))}"
         )
 

@@ -1,25 +1,36 @@
 import logging
 from asyncio import wait_for
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import BaseMessage
 from langchain_core.output_parsers import StrOutputParser
 
 from app.core.config import settings
 from app.prompts.chat_prompts import (
+    DOCUMENT_BASIS,
+    NO_COURSE_MATERIAL,
+    NO_WEB_RESULTS,
+    RETRIEVAL_NOTICES,
+    UNAVAILABLE_ATTACHMENTS_NOTICE,
     document_body_prompt,
     document_system_prompt,
     general_system_prompt,
     rag_system_prompt,
     web_search_system_prompt,
 )
-from app.prompts.graph_prompts import query_rewrite_prompt
-from app.schemas.agent_state import RewrittenQuery
 from app.services.retrieval_service import SearchResult
+from app.utils.citations import CitationRewriter
 
 logger = logging.getLogger(__name__)
+
+_GROUNDED_MODES = ("rag", "web_search")
+_MIN_EXCERPT_CHARS = 200
+
+
+def is_user_file(chunk: SearchResult) -> bool:
+    return "conversation_id" in chunk.metadata or "attachment_id" in chunk.metadata
 
 
 class ChatService:
@@ -37,6 +48,8 @@ class ChatService:
         resolved_query: str | None = None,
         document_title: str = "",
         document_status: str = "",
+        retrieval_status: str = "",
+        unavailable_attachments: list[str] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         question = message
 
@@ -52,17 +65,21 @@ class ChatService:
 
         input_vars: dict[str, Any] = {"history": history, "question": question}
 
-        if mode == "rag":
-            input_vars["context"] = self.format_context(context)
-            return rag_system_prompt, input_vars
-
-        if mode == "web_search":
-            input_vars["context"] = self.format_web_context(context)
-            return web_search_system_prompt, input_vars
+        if mode in _GROUNDED_MODES:
+            input_vars["material"] = self._material_block(
+                context, mode, retrieval_status, unavailable_attachments or []
+            )
+            prompt = rag_system_prompt if mode == "rag" else web_search_system_prompt
+            return prompt, input_vars
 
         if mode == "generate_pdf":
             input_vars["document_title"] = document_title or "your document"
             input_vars["document_status"] = document_status or "completed"
+            input_vars["document_basis"] = (
+                DOCUMENT_BASIS.get(retrieval_status, "")
+                if input_vars["document_status"] == "completed"
+                else ""
+            )
             return document_system_prompt, input_vars
 
         return general_system_prompt, input_vars
@@ -102,6 +119,8 @@ class ChatService:
         resolved_query: str | None = None,
         document_title: str = "",
         document_status: str = "",
+        retrieval_status: str = "",
+        unavailable_attachments: list[str] | None = None,
     ):
 
         prompt, input_vars = self._prepare(
@@ -112,6 +131,8 @@ class ChatService:
             resolved_query,
             document_title,
             document_status,
+            retrieval_status,
+            unavailable_attachments,
         )
 
         chain = prompt | self.llm | self.parser
@@ -119,6 +140,7 @@ class ChatService:
         logger.info(
             f"Generating response — "
             f"mode={mode} "
+            f"retrieval_status={retrieval_status or 'n/a'} "
             f"chunks={len(context)} "
             f"history_msgs={len(history)}"
         )
@@ -135,122 +157,160 @@ class ChatService:
             logger.exception(f"LLM response generation error: {e}")
             raise
 
-    async def generate_document_body(self, topic: str, history: list) -> str:
+    async def generate_document_body(
+        self,
+        topic: str,
+        history: list,
+        context: list[SearchResult],
+        retrieval_status: str = "",
+        unavailable_attachments: list[str] | None = None,
+    ) -> tuple[str, list[SearchResult]]:
         chain = document_body_prompt | self.llm | self.parser
+        material = self._material_block(
+            context, "generate_pdf", retrieval_status, unavailable_attachments or []
+        )
 
-        return await wait_for(
-            chain.ainvoke({"history": history or [], "question": topic}),
+        logger.info(
+            f"Generating document body — "
+            f"retrieval_status={retrieval_status or 'n/a'} "
+            f"chunks={len(context)} "
+            f"history_msgs={len(history or [])}"
+        )
+
+        raw_body = await wait_for(
+            chain.ainvoke(
+                {"history": history or [], "question": topic, "material": material}
+            ),
             timeout=settings.DOCUMENT_BODY_TIMEOUT_SECONDS,
         )
 
-    @staticmethod
-    def format_context(chunks: list[SearchResult]) -> str:
-        if not chunks:
-            return ""
+        return self.finalize_citations(raw_body, context, "rag", visible=False)
 
-        parts = []
-        total_chars = 0
+    def finalize_citations(
+        self,
+        raw_response: str,
+        context: list[SearchResult],
+        mode: str,
+        visible: bool | None = None,
+    ) -> tuple[str, list[SearchResult]]:
+        included = self.included_excerpts(context, mode)
+        rewriter = CitationRewriter(
+            visible=settings.CITATION_MARKERS_VISIBLE if visible is None else visible,
+            excerpt_count=len(included),
+        )
+        text = rewriter.rewrite(raw_response)
 
-        for i, chunk in enumerate(chunks, 1):
-            filename = chunk.metadata.get("filename") or "the document"
-            page = chunk.metadata.get("page_start")
-            header = f"Excerpt {i} from {filename}"
+        return text, [included[number - 1] for number in rewriter.order]
 
-            if isinstance(page, int) and page > 0:
-                header += f", page {page}"
+    @classmethod
+    def included_excerpts(cls, context: list[SearchResult], mode: str) -> list[SearchResult]:
+        if mode not in _GROUNDED_MODES or not context:
+            return []
 
-            part = f"{header}:\n{chunk.text}"
+        user_files = [(i, c) for i, c in enumerate(context) if is_user_file(c)]
+        course = [(i, c) for i, c in enumerate(context) if not is_user_file(c)]
 
-            parts.append(part)
-            total_chars += len(part)
-
-            if total_chars > settings.MAX_CONTEXT_CHARS:
-                logger.warning(
-                    f"Context truncated at chunk {i} — exceeded {settings.MAX_CONTEXT_CHARS} chars"
-                )
-                break
-
-        return "\n\n---\n\n".join(parts)
-
-    @staticmethod
-    def format_web_context(chunks: list[SearchResult]) -> str:
-        if not chunks:
-            return ""
-
-        parts = []
-        total_chars = 0
-
-        for i, chunk in enumerate(chunks, 1):
-            title = chunk.metadata.get("title", "Untitled")
-            url = chunk.metadata.get("url", "")
-            published = chunk.metadata.get("published_date")
-            header = f"Web result {i}: {title} ({url})"
-
-            if published:
-                header += f" — {published}"
-
-            part = f"{header}\n{chunk.text}"
-
-            parts.append(part)
-            total_chars += len(part)
-
-            if total_chars > settings.MAX_CONTEXT_CHARS:
-                logger.warning(
-                    f"Web context truncated at chunk {i} — exceeded {settings.MAX_CONTEXT_CHARS} chars"
-                )
-                break
-
-        return "\n\n---\n\n".join(parts)
-
-    async def rewrite_query(self, user_query: str, history: list[BaseMessage]):
-        chain = query_rewrite_prompt | self._utility_llm | self.parser
-
-        try:
-            result = await wait_for(
-                chain.ainvoke(
-                    {"history": history or [], "user_query": user_query}
-                ),
-                timeout=15.0
-            )
-
-            rewritten = self._clean_rewrite(result)
-
-            return RewrittenQuery(rewritten_query=rewritten or user_query)
-
-        except TimeoutError:
-            logger.warning(
-                "Query rewriting timed out; using original user query"
-            )
-
-        except Exception:
-            logger.exception(
-                "Query rewriting failed; using original user query"
-            )
-
-        return RewrittenQuery(rewritten_query=user_query)
-
-    @staticmethod
-    def _clean_rewrite(raw: str | None) -> str:
-        text = (raw or "").strip().strip('"').strip()
-
-        if not text:
-            return text
-
-        prefixes = (
-            "rewritten question:",
-            "rewritten query:",
-            "standalone question:",
-            "standalone query:",
-            "here is the rewritten question:",
-            "here is the standalone question:",
-            "question:",
-            "query:",
+        user_budget = (
+            settings.ATTACHMENT_CONTEXT_CHARS if course else settings.MAX_CONTEXT_CHARS
         )
 
-        lowered = text.lower()
-        for prefix in prefixes:
-            if lowered.startswith(prefix):
-                text = text[len(prefix):].strip().strip('"').strip()
-                break
+        fitted: dict[int, SearchResult] = {}
+        user_used = cls._fit(user_files, user_budget, fitted)
+        cls._fit(course, settings.MAX_CONTEXT_CHARS - user_used, fitted)
 
-        return text.splitlines()[0].strip() if text else text
+        if len(fitted) < len(context) or any(
+            fitted[i].text != context[i].text for i in fitted
+        ):
+            logger.info(
+                f"Context budget applied — kept {len(fitted)}/{len(context)} excerpts "
+                f"(uploaded files {user_used} chars, budget {settings.MAX_CONTEXT_CHARS})"
+            )
+
+        return [fitted[i] for i in sorted(fitted)]
+
+    @staticmethod
+    def _fit(
+        items: list[tuple[int, SearchResult]], budget: int, fitted: dict[int, SearchResult]
+    ) -> int:
+        used = 0
+
+        for index, chunk in items:
+            remaining = budget - used
+
+            if len(chunk.text) <= remaining:
+                fitted[index] = chunk
+                used += len(chunk.text)
+                continue
+
+            if remaining >= _MIN_EXCERPT_CHARS:
+                cut = chunk.text.rfind(" ", 0, remaining)
+                cut = cut if cut > remaining // 2 else remaining
+                text = chunk.text[:cut].rstrip() + " …"
+                fitted[index] = replace(chunk, text=text)
+                used += len(text)
+
+            break
+
+        return used
+
+    def _material_block(
+        self,
+        context: list[SearchResult],
+        mode: str,
+        retrieval_status: str,
+        unavailable_attachments: list[str],
+    ) -> str:
+        parts = self._excerpt_parts(context, "web_search" if mode == "web_search" else "rag")
+        empty = NO_WEB_RESULTS if mode == "web_search" else NO_COURSE_MATERIAL
+        blocks = ["\n\n---\n\n".join(parts) if parts else empty]
+
+        notice = RETRIEVAL_NOTICES.get((mode, retrieval_status), "")
+        if notice:
+            blocks.append(notice)
+
+        if unavailable_attachments:
+            blocks.append(
+                UNAVAILABLE_ATTACHMENTS_NOTICE.format(
+                    filenames=", ".join(dict.fromkeys(unavailable_attachments))
+                )
+            )
+
+        return "\n\n".join(blocks)
+
+    @classmethod
+    def _excerpt_parts(cls, chunks: list[SearchResult], mode: str) -> list[str]:
+        label = cls._web_label if mode == "web_search" else cls._course_label
+
+        return [
+            f"{label(i, chunk)}\n{chunk.text}"
+            for i, chunk in enumerate(cls.included_excerpts(chunks, mode), 1)
+        ]
+
+    @staticmethod
+    def _course_label(index: int, chunk: SearchResult) -> str:
+        metadata = chunk.metadata
+        filename = metadata.get("filename") or "the document"
+
+        if is_user_file(chunk):
+            origin = f"Uploaded file: {filename}"
+        else:
+            origin = f"Textbook: {metadata.get('doc_title') or filename}"
+
+        section_path = metadata.get("section_path")
+        if isinstance(section_path, list) and section_path:
+            origin += f" — {' › '.join(map(str, section_path))}"
+
+        page = metadata.get("page_start")
+        if isinstance(page, int) and page > 0:
+            origin += f" (page {page})"
+
+        return f"[S{index}] {origin}"
+
+    @staticmethod
+    def _web_label(index: int, chunk: SearchResult) -> str:
+        title = chunk.metadata.get("title") or "Untitled"
+        url = chunk.metadata.get("url", "")
+        published = chunk.metadata.get("published_date")
+        label = f"[S{index}] {title} ({url})"
+
+        return f"{label} — {published}" if published else label
