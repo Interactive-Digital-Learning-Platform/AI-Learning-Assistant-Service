@@ -142,7 +142,7 @@ class RetrievalService:
         neighbour_top_n: int = settings.RETRIEVAL_NEIGHBOUR_TOP_N,
         neighbour_max_words: int = settings.RETRIEVAL_NEIGHBOUR_MAX_WORDS,
     ):
-        self.client = AsyncQdrantClient(url=settings.QDRANT_URL)
+        self.client = AsyncQdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY or None)
         self.collection = collection
         self.embedder = embedder
         self.top_k = top_k

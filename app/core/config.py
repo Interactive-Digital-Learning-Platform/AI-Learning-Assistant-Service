@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 768
 
     QDRANT_URL: str
+    QDRANT_API_KEY: str | None = None
     QDRANT_COLLECTION: str = "pdf_knowledge_base"
 
     TOP_K_CHUNKS: int = 5
