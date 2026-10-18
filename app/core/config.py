@@ -24,7 +24,33 @@ class Settings(BaseSettings):
     TOP_K_CHUNKS: int = 5
     SCORE_THRESHOLD: float = 0.4
     RERANK_SCORE_THRESHOLD: float = 0.3
+    RERANK_WEAK_SCORE_THRESHOLD: float = 0.1
+    RETRIEVAL_WEAK_TOP_K: int = 2
+    RETRIEVAL_TIMEOUT_SECONDS: float = 15.0
+    RETRIEVAL_MAX_ATTEMPTS: int = 2
+    RETRIEVAL_DEDUP_THRESHOLD: float = 0.8
+    RETRIEVAL_NEIGHBOUR_WINDOW: int = 1
+    RETRIEVAL_NEIGHBOUR_TOP_N: int = 3
+    RETRIEVAL_NEIGHBOUR_MAX_WORDS: int = 800
+    RETRIEVAL_SCOPE_ENABLED: bool = True
+    RETRIEVAL_GRADE_LOOKBACK: int = 1
+    KB_SUBJECTS: list[str] = [
+        "Science",
+        "Mathematics",
+        "ICT",
+        "English",
+        "History",
+        "Geography",
+        "Health and Physical Education",
+    ]
     MAX_HISTORY_MESSAGES: int = 10
+    HISTORY_MAX_CHARS: int = 6000
+    HISTORY_FULL_MESSAGES: int = 6
+    HISTORY_OLDER_MESSAGE_CHARS: int = 300
+    QUERY_ANALYSIS_TIMEOUT_SECONDS: float = 15.0
+    TITLE_GENERATION_ENABLED: bool = True
+    TITLE_GENERATION_TIMEOUT_SECONDS: float = 8.0
+    TITLE_MAX_CHARS: int = 80
 
     GROQ_API_KEY: SecretStr
     GROQ_MODEL: str
@@ -38,10 +64,19 @@ class Settings(BaseSettings):
     KEY_PREFIX: str
     MAX_INPUTS_PER_BATCH: int = 32
 
-    MAX_CONTEXT_CHARS: int = 12000
+    MAX_CONTEXT_CHARS: int = 18000
+    ATTACHMENT_CONTEXT_CHARS: int = 7000
+    CITATION_MARKERS_VISIBLE: bool = False
 
     RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     RERANK_OVERFETCH: int = 4
+
+    HYBRID_SEARCH_ENABLED: bool = True
+    HYBRID_PREFETCH_LIMIT: int = 40
+    DENSE_VECTOR_NAME: str = "dense"
+    SPARSE_VECTOR_NAME: str = "bm25"
+    SPARSE_MODEL: str = "Qdrant/bm25"
+    FASTEMBED_CACHE_DIR: str | None = None
 
     LANGSMITH_TRACING: bool = True
     LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
@@ -69,6 +104,7 @@ class Settings(BaseSettings):
     ATTACHMENT_SCORE_THRESHOLD: float = 0.55
 
     ATTACHMENT_INLINE_MAX_CHARS: int = 12_000
+    ATTACHMENT_INLINE_PARSE_TIMEOUT_SECONDS: float = 30.0
     ATTACHMENT_INLINE_MAX_PDF_PAGES: int = 8
     ATTACHMENT_MAX_PDF_PAGES: int = 50
 
@@ -114,6 +150,7 @@ class Settings(BaseSettings):
     DOCUMENT_MCP_TIMEOUT_SECONDS: float = 40.0
     DOCUMENT_MAX_BODY_CHARS: int = 20_000
     DOCUMENT_USER_RATE_LIMIT_PER_MIN: int = 5
+    DOCUMENT_TOP_K_CHUNKS: int = 8
 
 
 settings = Settings()

@@ -2,11 +2,14 @@ import json
 import logging
 
 from langchain_core.messages import AIMessage, HumanMessage
+from redis.exceptions import WatchError
 
 from app.core.config import settings
 from app.core.redis import redis_instance
 
 logger = logging.getLogger(__name__)
+
+_APPEND_MAX_ATTEMPTS = 5
 
 
 class SessionService:
@@ -17,33 +20,49 @@ class SessionService:
     def _key(conversation_id: str) -> str:
         return f"{settings.KEY_PREFIX}:{conversation_id}:history"
 
-    async def get_langchain_history(
-        self,
-        conversation_id: str,
-    ) -> list:
-
-        key = self._key(conversation_id)
-        data = await self._redis.get(key)
-
-        if not data:
-            logger.debug(f"Cache miss for conversation {conversation_id}")
-            return []
-
-        await self._redis.expire(key, settings.HISTORY_TTL)
-
-        messages = json.loads(data)
-
-        messages = messages[-(settings.MAX_HISTORY_MESSAGES * 2) :]
-
+    @staticmethod
+    def _to_langchain(messages: list[dict]) -> list:
         lc_messages = []
 
-        for msg in messages:
+        for msg in messages[-(settings.MAX_HISTORY_MESSAGES * 2) :]:
             if msg["role"] == "user":
                 lc_messages.append(HumanMessage(content=msg["content"]))
             elif msg["role"] == "assistant":
                 lc_messages.append(AIMessage(content=msg["content"]))
 
         return lc_messages
+
+    @staticmethod
+    def _to_cache_entries(db_messages: list) -> list[dict]:
+        messages = [
+            {"role": msg.role.value, "content": msg.content}
+            for msg in db_messages
+            if msg.role.value in ("user", "assistant")
+        ]
+
+        return messages[-(settings.MAX_HISTORY_MESSAGES * 2) :]
+
+    def history_from_db(self, db_messages: list) -> list:
+        return self._to_langchain(self._to_cache_entries(db_messages))
+
+    async def get_cached_history(self, conversation_id: str) -> list | None:
+        key = self._key(conversation_id)
+        data = await self._redis.get(key)
+
+        if not data:
+            logger.debug(f"Cache miss for conversation {conversation_id}")
+            return None
+
+        await self._redis.expire(key, settings.HISTORY_TTL)
+
+        return self._to_langchain(json.loads(data))
+
+    async def get_langchain_history(
+        self,
+        conversation_id: str,
+    ) -> list:
+
+        return await self.get_cached_history(conversation_id) or []
 
     async def get_raw_history(self, conversation_id: str) -> list[dict]:
         key = self._key(conversation_id)
@@ -62,9 +81,10 @@ class SessionService:
 
         key = self._key(conversation_id)
         max_store = settings.MAX_HISTORY_MESSAGES * 2
+        messages: list[dict] = []
 
         async with self._redis.pipeline(transaction=True) as pipe:
-            while True:
+            for attempt in range(1, _APPEND_MAX_ATTEMPTS + 1):
                 try:
                     await pipe.watch(key)
                     data = await pipe.get(key)
@@ -76,8 +96,13 @@ class SessionService:
                     await pipe.set(key, json.dumps(messages), ex=settings.HISTORY_TTL)
                     await pipe.execute()
                     break
-                except Exception:
-                    continue
+                except WatchError:
+                    if attempt == _APPEND_MAX_ATTEMPTS:
+                        logger.warning(
+                            f"History append gave up after {attempt} concurrent-write "
+                            f"conflicts — conversation={conversation_id}"
+                        )
+                        raise
 
         logger.debug(
             f"Appended {role} message — "
@@ -90,13 +115,7 @@ class SessionService:
         db_messages: list,
     ) -> None:
 
-        messages = [
-            {"role": msg.role.value, "content": msg.content}
-            for msg in db_messages
-            if msg.role.value in ("user", "assistant")
-        ]
-
-        messages = messages[-(settings.MAX_HISTORY_MESSAGES * 2) :]
+        messages = self._to_cache_entries(db_messages)
 
         key = self._key(conversation_id)
         await self._redis.set(key, json.dumps(messages), ex=settings.HISTORY_TTL)

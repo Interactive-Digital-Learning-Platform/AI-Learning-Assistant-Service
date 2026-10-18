@@ -2,26 +2,34 @@ import logging
 from asyncio import gather, wait_for
 from typing import Any, Awaitable, Literal
 
+from langgraph.runtime import Runtime
 from langgraph.types import Command
-from sqlalchemy import select
+from redis.exceptions import RedisError
+from sqlalchemy import desc, select
 
 from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.attachment_model import Attachment
+from app.models.message_model import Message
 from app.schemas.agent_state import AgentState
 from app.schemas.attachment import (
     GROUNDABLE_STATUSES,
     PENDING_STATUSES,
     AttachmentStatus,
 )
-from app.schemas.retrieval import SearchResult
+from app.schemas.retrieval import RetrievalOutcome, SearchResult
 from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
 from app.services.inline_attachment_service import InlineAttachmentService
-from app.services.retrieval_service import RetrievalService
+from app.services.retrieval_service import (
+    RetrievalService,
+    is_transient_retrieval_error,
+)
 from app.services.session_service import SessionService
 from app.services.translator_service import TranslationError, TranslatorService
 from app.services.web_search_service import WebSearchService
+from app.utils.citations import source_list
+from app.utils.history import budget_history
 from app.utils.language import resolve_translation_plan
 from app.utils.rate_limit import TokenBucket
 
@@ -116,16 +124,70 @@ class GraphNodes:
 
     async def _safe_search(self, search_coro: Awaitable[list[SearchResult]]) -> list[SearchResult]:
         try:
-            return await wait_for(search_coro, timeout=15.0)
+            return await wait_for(search_coro, timeout=settings.RETRIEVAL_TIMEOUT_SECONDS)
         except Exception:
             logger.exception("Document retrieval failed; continuing without this source")
             return []
 
+
+    async def _retrieve_kb(
+        self,
+        query: str,
+        sub_queries: list[str],
+        top_k: int | None = None,
+        grade: int | None = None,
+        subject: str | None = None,
+    ) -> RetrievalOutcome | Exception:
+        if not settings.RETRIEVAL_SCOPE_ENABLED:
+            grade, subject = None, None
+
+        try:
+            return await wait_for(
+                self.retrieval_service.retrieve_scoped(
+                    query=query,
+                    grade=grade,
+                    subject=subject,
+                    top_k=top_k,
+                    sub_queries=sub_queries,
+                ),
+                timeout=settings.RETRIEVAL_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            return exc
+
+
+    def _resolve_kb_outcome(
+        self, result: RetrievalOutcome | Exception, runtime: Runtime
+    ) -> RetrievalOutcome:
+        if not isinstance(result, Exception):
+            return result
+
+        attempt = (
+            runtime.execution_info.node_attempt
+            if runtime.execution_info
+            else settings.RETRIEVAL_MAX_ATTEMPTS
+        )
+
+        if is_transient_retrieval_error(result) and attempt < settings.RETRIEVAL_MAX_ATTEMPTS:
+            logger.warning(
+                "Knowledge base retrieval failed on attempt %d (%s); retrying",
+                attempt, type(result).__name__,
+            )
+            raise result
+
+        logger.error(
+            "Knowledge base retrieval failed; continuing without course material",
+            exc_info=result,
+        )
+        return RetrievalOutcome(status="error")
+
             
-    async def _load_inline_attachments(self, attachment_ids: list[str]) -> list[SearchResult]:
+    async def _load_inline_attachments(
+        self, attachment_ids: list[str], names: dict[str, str]
+    ) -> tuple[list[SearchResult], list[str]]:
 
         if not attachment_ids:
-            return []
+            return [], []
 
         results = await gather(
             *(self.inline_attachment_service.get_inline_text(aid) for aid in attachment_ids),
@@ -133,94 +195,131 @@ class GraphNodes:
         )
 
         inline_chunks: list[SearchResult] = []
+        unavailable: list[str] = []
 
         for attachment_id, result in zip(attachment_ids, results):
             if isinstance(result, BaseException):
-                logger.exception(
-                    "Inline attachment re-parse failed for attachment_id=%s", attachment_id
+                logger.error(
+                    "Inline attachment text could not be loaded for attachment_id=%s",
+                    attachment_id, exc_info=result,
                 )
+                unavailable.append(names.get(attachment_id, "your uploaded file"))
                 continue
 
-            if result is not None:
-                inline_chunks.append(result)
+            if result is None:
+                unavailable.append(names.get(attachment_id, "your uploaded file"))
+                continue
 
-        return inline_chunks
+            inline_chunks.append(result)
+
+        return inline_chunks, unavailable
 
         
+    async def _load_history_from_db(
+        self, conversation_id: str, current_message_id: str
+    ) -> list:
+        query = select(Message).where(Message.conversation_id == conversation_id)
+
+        if current_message_id:
+            query = query.where(Message.id != current_message_id)
+
+        async with async_session_maker() as session:
+            result = await session.execute(
+                query.order_by(desc(Message.created_at)).limit(
+                    settings.MAX_HISTORY_MESSAGES * 2
+                )
+            )
+            db_messages = list(reversed(result.scalars().all()))
+
+        try:
+            await self.session_service.warm_cache(conversation_id, db_messages)
+        except RedisError:
+            logger.exception(
+                "History cache re-warm failed — conversation=%s", conversation_id
+            )
+
+        return self.session_service.history_from_db(db_messages)
+
+
     async def load_memory_node(
         self, state: AgentState
     ) -> Command[Literal["check_attachments"]]:
         logger.info("Load memory node is reached")
-        history = await self.session_service.get_langchain_history(
-            state["conversation_id"]
-        )
+        conversation_id = state["conversation_id"]
 
-        return Command(update={"history": history}, goto="check_attachments")
+        try:
+            history = await self.session_service.get_cached_history(conversation_id)
+        except RedisError:
+            logger.exception(
+                "History cache read failed; loading from the database — conversation=%s",
+                conversation_id,
+            )
+            history = None
+
+        if history is None:
+            history = await self._load_history_from_db(
+                conversation_id, state.get("user_message_id", "")
+            )
+            logger.info(
+                "History loaded from the database — conversation=%s messages=%d",
+                conversation_id, len(history),
+            )
+
+        budgeted = budget_history(history)
+
+        if len(budgeted) < len(history) or any(
+            b.content != h.content for b, h in zip(reversed(budgeted), reversed(history))
+        ):
+            logger.info(
+                "History budgeted — conversation=%s messages=%d→%d chars=%d→%d",
+                conversation_id, len(history), len(budgeted),
+                sum(len(str(m.content)) for m in history),
+                sum(len(str(m.content)) for m in budgeted),
+            )
+
+        return Command(update={"history": budgeted}, goto="check_attachments")
 
         
     async def check_attachments_node(self, state: AgentState) -> Command[Literal["classify_intent"]]:
         async with async_session_maker() as session:
             result = await session.execute(
-                select(Attachment.id, Attachment.status).where(
+                select(
+                    Attachment.id, Attachment.status, Attachment.filename, Attachment.message_id
+                ).where(
                     Attachment.conversation_id == state["conversation_id"]
                 )
             )
 
             rows = result.all()
 
-        inline_attachment_ids = [
-            str(attachment_id) for attachment_id, status in rows
-            if status == AttachmentStatus.READY_INLINE
-        ]
+        groundable = [row for row in rows if row.status in GROUNDABLE_STATUSES]
+        current_message_id = state.get("user_message_id", "")
 
         return Command(
             update={
-                "inline_attachment_ids": inline_attachment_ids,
-                "has_attachments": any(status in GROUNDABLE_STATUSES for _, status in rows),
-                "attachment_pending": any(status in PENDING_STATUSES for _, status in rows)
+                "inline_attachment_ids": [
+                    str(row.id) for row in groundable
+                    if row.status == AttachmentStatus.READY_INLINE
+                ],
+                "attachment_names": {str(row.id): row.filename for row in groundable},
+                "has_attachments": bool(groundable),
+                "message_has_attachments": any(
+                    str(row.message_id) == current_message_id for row in groundable
+                ),
+                "attachment_pending": any(row.status in PENDING_STATUSES for row in rows)
             },
             goto="classify_intent"
         )
         
         
-    async def rewrite_query_node(
-        self, state: AgentState
-    ) -> Command[Literal["retrieve_docs", "web_search"]]:
-        response = await self.chat_service.rewrite_query(
-            user_query=state["user_message"], history=state["history"]
-        )
-
-        logger.info(
-            f"Query rewritten: '{state['user_message']}' -> '{response.rewritten_query}'"
-        )
-
-        goto = "web_search" if state.get("intent") == "web_search" else "retrieve_docs"
-
-        return Command(
-            update={"rewritten_query": response.rewritten_query}, goto=goto
-        )
-
-
     async def web_search_node(self, state: AgentState) -> dict[str, Any]:
         query = state["rewritten_query"] or state["user_message"]
 
         chunks = await self.web_search_service.search(query)
 
-        sources = [
-            {
-                "title": c.metadata.get("title", ""),
-                "url": c.metadata.get("url", ""),
-                "snippet": c.text[:300],
-                "provider": c.metadata.get("source"),
-                "score": c.score,
-            }
-            for c in chunks
-        ]
-
         logger.info("Web search node produced %d results", len(chunks))
 
         return {
-            "sources": sources,
             "context": chunks,
             "retrieved_chunks": chunks,
             "rag_used": False,
@@ -229,55 +328,72 @@ class GraphNodes:
 
 
     async def retrieve_docs_node(
-        self, state: AgentState
-    ) -> Command[Literal["web_search", "generate_response"]]:
+        self, state: AgentState, runtime: Runtime
+    ) -> Command[Literal["web_search", "generate_response", "generate_document"]]:
         query = state["rewritten_query"] or state["user_message"]
 
-        try:
-            kb_chunks, attachment_chunks, inline_chunks = await gather(
-                self._safe_search(self.retrieval_service.search(query=query)),
-                self._safe_search(self.attachment_retrieval_service.search(
-                    query=query,
-                    filters={
-                        "conversation_id": state["conversation_id"]
-                    }
-                )),
-                self._load_inline_attachments(state["inline_attachment_ids"])
+        sub_queries = state.get("sub_queries") or []
+        for_document = state["intent"] == "generate_pdf"
+
+        kb_result, attachment_chunks, (inline_chunks, unavailable) = await gather(
+            self._retrieve_kb(
+                query,
+                sub_queries,
+                settings.DOCUMENT_TOP_K_CHUNKS if for_document else None,
+                state.get("grade"),
+                state.get("subject"),
+            ),
+            self._safe_search(self.attachment_retrieval_service.search(
+                query=query,
+                filters={
+                    "conversation_id": state["conversation_id"]
+                },
+                sub_queries=sub_queries,
+            )),
+            self._load_inline_attachments(
+                state["inline_attachment_ids"], state.get("attachment_names", {})
             )
+        )
 
-            chunks = kb_chunks + attachment_chunks + inline_chunks
+        kb_outcome = self._resolve_kb_outcome(kb_result, runtime)
 
-        except Exception:
-            logger.exception(
-                "Document retrieval failed; continuing without context"
-            )
-            chunks = []
+        user_chunks = inline_chunks + attachment_chunks
+        chunks = (
+            user_chunks + kb_outcome.results
+            if state.get("message_has_attachments")
+            else kb_outcome.results + user_chunks
+        )
 
-        if not chunks and self.web_search_service.enabled:
+        retrieval_update = {
+            "retrieval_status": kb_outcome.status,
+            "retrieval_best_score": kb_outcome.best_score,
+            "retrieval_scope": kb_outcome.scope,
+            "unavailable_attachments": unavailable,
+        }
+
+        if (
+            not for_document
+            and kb_outcome.status == "none"
+            and not chunks
+            and not unavailable
+            and self.web_search_service.enabled
+        ):
             logger.info(
-                "Retrieval returned no context; falling back to web search"
+                "No relevant course material found (best_score=%s); falling back to web search",
+                kb_outcome.best_score,
             )
             return Command(
-                update={"intent": "web_search"}, goto="web_search"
+                update={**retrieval_update, "intent": "web_search"}, goto="web_search"
             )
-
-        sources = [
-            {
-                "filename": c.metadata.get("filename", ""),
-                "page": c.metadata.get("page_start", 0),
-                "score": c.score,
-            }
-            for c in chunks
-        ]
 
         return Command(
             update={
-                "sources": sources,
+                **retrieval_update,
                 "context": chunks,
                 "retrieved_chunks": chunks,
-                "rag_used": bool(chunks) and state["intent"] == "rag",
+                "rag_used": bool(chunks),
             },
-            goto="generate_response",
+            goto="generate_document" if for_document else "generate_response",
         )
 
 
@@ -293,8 +409,16 @@ class GraphNodes:
                 "document_title": topic[:80],
             }
 
+        context = state.get("context") or []
+
         try:
-            body = await self.chat_service.generate_document_body(topic, state["history"])
+            body, cited = await self.chat_service.generate_document_body(
+                topic,
+                state["history"],
+                context,
+                retrieval_status=state.get("retrieval_status", "skipped"),
+                unavailable_attachments=state.get("unavailable_attachments", []),
+            )
         except Exception:
             logger.exception("Document body generation failed")
             return {
@@ -314,24 +438,60 @@ class GraphNodes:
                 "document_title": title,
             }
 
+        included = self.chat_service.included_excerpts(context, "rag")
+        citation_fallback = bool(included) and not cited
+
+        if citation_fallback:
+            logger.warning(
+                "Document cited none of the %d excerpts; listing all of them as sources",
+                len(included),
+            )
+
         return {
             "documents": [result],
             "document_status": "completed",
             "document_title": result.get("filename") or title,
+            "sources": source_list(included if citation_fallback else cited, "rag"),
+            "citation_count": len(cited),
+            "citation_fallback": citation_fallback,
         }
 
 
     async def generate_response_node(self, state: AgentState) -> dict[str, Any]:
         logger.info("Response node is reached")
 
-        response = await self.chat_service.get_response(
+        mode = state["intent"]
+        context = state["context"]
+
+        raw_response = await self.chat_service.get_response(
             message=state["user_message"],
             resolved_query=state["rewritten_query"],
             history=state["history"],
-            context=state["context"],
-            mode=state["intent"],
+            context=context,
+            mode=mode,
+            retrieval_status=state.get("retrieval_status", "skipped"),
+            unavailable_attachments=state.get("unavailable_attachments", []),
             document_title=state.get("document_title", ""),
             document_status=state.get("document_status", ""),
         )
 
-        return {"response": response}
+        response, cited = self.chat_service.finalize_citations(raw_response, context, mode)
+
+        if mode == "generate_pdf":
+            return {"response": response}
+
+        included = self.chat_service.included_excerpts(context, mode)
+        citation_fallback = bool(included) and not cited
+
+        if citation_fallback:
+            logger.warning(
+                "Answer cited none of the %d excerpts (mode=%s); listing all of them as sources",
+                len(included), mode,
+            )
+
+        return {
+            "response": response,
+            "sources": source_list(included if citation_fallback else cited, mode),
+            "citation_count": len(cited),
+            "citation_fallback": citation_fallback,
+        }

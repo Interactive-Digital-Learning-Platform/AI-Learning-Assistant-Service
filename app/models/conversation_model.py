@@ -16,7 +16,7 @@ class Conversation(Base):
 
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
-    title: Mapped[str] = mapped_column(String(255), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

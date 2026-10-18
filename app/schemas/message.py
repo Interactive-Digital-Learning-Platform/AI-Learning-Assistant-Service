@@ -46,6 +46,7 @@ class MessageResponse(BaseModel):
     is_translated: bool = False
     translated_content: Optional[str] = None
     translation_failed: bool = False
+    conversation_title: Optional[str] = None
 
     class Config:
         from_attributes = True

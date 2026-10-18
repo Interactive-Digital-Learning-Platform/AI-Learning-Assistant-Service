@@ -132,6 +132,12 @@ async def _process_attachment(ctx: dict, attachment_id: str) -> None:
             content_type=attachment.content_type
         )
 
+        if not text.strip():
+            attachment.status = AttachmentStatus.FAILED
+            attachment.error_message = "No text could be extracted from this file"
+            await session.commit()
+            return
+
         if len(text) > settings.ATTACHMENT_INLINE_MAX_CHARS:
             logger.warning(
                 "Extracted text for attachment_id=%s (%s) is %d chars, over "
@@ -142,5 +148,6 @@ async def _process_attachment(ctx: dict, attachment_id: str) -> None:
 
         attachment.status = AttachmentStatus.READY_INLINE
         attachment.extraction_method = extraction_method
+        attachment.extracted_text = text
         await session.commit()
         

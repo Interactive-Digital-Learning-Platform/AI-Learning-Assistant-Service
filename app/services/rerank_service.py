@@ -27,7 +27,7 @@ class RerankService:
         if not candidates:
             return []
 
-        pairs = [(query, c.text) for c in candidates]
+        pairs = [(query, c.contextual_text) for c in candidates]
         raw_scores = await to_thread(self.model.predict, pairs)
 
         scores = 1.0 / (1.0 + np.exp(-np.asarray(raw_scores, dtype=float)))

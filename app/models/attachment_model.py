@@ -44,6 +44,7 @@ class Attachment(Base):
     stage: Mapped[ProcessingStage | None] = mapped_column(Enum(ProcessingStage), nullable=True)
     extraction_method: Mapped[str | None] = mapped_column(String(50), nullable=True)
     chunk_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
