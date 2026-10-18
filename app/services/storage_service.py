@@ -1,4 +1,5 @@
 import aioboto3
+from botocore.config import Config
 
 from app.core.config import settings
 
@@ -7,6 +8,11 @@ class StorageService:
     def __init__(self):
         self._session = aioboto3.Session()
         self.bucket = settings.S3_BUCKET
+        self._config = Config(
+            signature_version="s3v4",
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required"
+        )
 
 
     def _client(self):
@@ -15,7 +21,8 @@ class StorageService:
             endpoint_url=settings.S3_ENDPOINT_URL,
             aws_access_key_id=settings.S3_ACCESS_KEY,
             aws_secret_access_key=settings.S3_SECRET_KEY,
-            region_name=settings.S3_REGION
+            region_name=settings.S3_REGION,
+            config=self._config
         )
 
     async def upload(self, key: str, data: bytes, content_type: str) -> None:
