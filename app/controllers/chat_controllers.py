@@ -85,18 +85,19 @@ async def get_conversation(session: AsyncSession, conversation_id: str):
         count = count_result.scalar() or 0
         return conversation_to_response(conv, message_count=count)
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 async def delete_conversation(
-    session: AsyncSession, request: Request, conversation_id: str
+    session: AsyncSession, request: Request, conversation_id: str, user_id: str
 ):
     try:
         conv = await get_conversation_or_404(conversation_id, session)
-
-        session_service = request.app.state.session_service
-        await session_service.clear(conversation_id)
+        if conv.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
 
         attachment_result = await session.execute(
             select(Attachment.storage_key).where(Attachment.conversation_id == conv.id)
@@ -104,24 +105,62 @@ async def delete_conversation(
 
         storage_keys = [row[0] for row in attachment_result.all()]
 
-        attachment_retrieval_service: RetrievalService = request.app.state.attachment_retrieval_service
-        storage_service: StorageService = request.app.state.storage_service
+        # Postgres is the source of truth, so the conversation (and its cascaded
+        # messages/attachments) is removed first. A failed commit leaves everything
+        # untouched; a failed cleanup below only leaves an orphan behind, never a
+        # conversation with its attachment data half gone.
+        await session.delete(conv)
+        await session.commit()
+        logger.info(f"Conversation deleted — id={conversation_id}")
 
+    except HTTPException:
+        raise
+    except Exception as e:
+        await session.rollback()
+        logger.exception(f"Conversation delete failed — id={conversation_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    await _cleanup_deleted_conversation(request, conversation_id, storage_keys)
+
+
+async def _cleanup_deleted_conversation(
+    request: Request, conversation_id: str, storage_keys: list[str]
+) -> None:
+    """Best-effort removal of a deleted conversation's data outside Postgres.
+
+    Each step is independent: a failure is logged (so the orphan can be found)
+    and the remaining steps still run.
+    """
+    session_service = request.app.state.session_service
+    attachment_retrieval_service: RetrievalService = request.app.state.attachment_retrieval_service
+    storage_service: StorageService = request.app.state.storage_service
+
+    try:
+        await session_service.clear(conversation_id)
+    except Exception:
+        logger.exception(
+            f"Failed to clear history cache for deleted conversation — id={conversation_id}"
+        )
+
+    try:
         await attachment_retrieval_service.delete_by_filter(
             filters={
                 "conversation_id": conversation_id
             }
         )
+    except Exception:
+        logger.exception(
+            f"Failed to delete attachment vectors for deleted conversation — id={conversation_id}"
+        )
 
-        for storage_key in storage_keys:
+    for storage_key in storage_keys:
+        try:
             await storage_service.delete(storage_key)
-        
-        await session.delete(conv)
-        await session.commit()
-        logger.info(f"Conversation deleted — id={conversation_id}")
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            logger.exception(
+                f"Failed to delete attachment file for deleted conversation — "
+                f"id={conversation_id} key={storage_key}"
+            )
 
 
 async def get_messages(
@@ -204,6 +243,8 @@ async def get_messages(
             next_cursor=next_cursor,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -407,5 +448,7 @@ async def send_message(
 
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
