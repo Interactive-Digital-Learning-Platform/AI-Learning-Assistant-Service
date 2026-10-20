@@ -22,6 +22,7 @@ from app.graph.nodes import GraphNodes
 from app.graph.workflow import create_assistant_graph
 from app.routes.attachment_routes import router as attachment_router
 from app.routes.chat_routes import router as chat_router
+from app.routes.share_routes import router as share_router
 from app.routes.webhook_routes import router as webhook_router
 from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
@@ -147,6 +148,7 @@ app.add_middleware(
 )
 
 app.include_router(chat_router)
+app.include_router(share_router)
 app.include_router(attachment_router)
 app.include_router(webhook_router)
 

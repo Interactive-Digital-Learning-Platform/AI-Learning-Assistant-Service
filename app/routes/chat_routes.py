@@ -55,8 +55,11 @@ async def delete_conversation(
     conversation_id: str,
     request: Request,
     session: Annotated[AsyncSession, Depends(get_async_session)],
+    user_id: str = Query(...),
 ):
-    return await chat_controllers.delete_conversation(session, request, conversation_id)
+    return await chat_controllers.delete_conversation(
+        session, request, conversation_id, user_id
+    )
 
 
 @router.get("/{conversation_id}/messages", response_model=MessageHistoryResponse)
